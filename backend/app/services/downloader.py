@@ -1,14 +1,94 @@
 """Tải video YouTube bằng yt-dlp (nightly) vào backend/temp/videos/."""
 
+import importlib.util
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from app.config import settings
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _BAD_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+#: File cookie YouTube do người dùng upload (định dạng Netscape cookies.txt).
+#: Nằm trong backend/temp (gitignored) để backend dùng cho mọi lượt tải.
+def cookies_path() -> Path:
+    return settings.temp_dir / "youtube_cookies.txt"
+
+
+COOKIES_PATH = settings.temp_dir / "youtube_cookies.txt"
+
+_BOT_CHECK_MARKERS = (
+    "Sign in to confirm",
+    "not a bot",
+    "cookies-from-browser",
+    "cookies for the authentication",
+)
+
+
+def youtube_cookies_file() -> Path | None:
+    """Trả về file cookies.txt nếu đã upload và còn nội dung."""
+    path = cookies_path()
+    try:
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def cookies_args(browser: str = "") -> list[str]:
+    """Ưu tiên file cookies.txt (ổn định hơn) rồi mới tới cookie trình duyệt."""
+    cookies_file = youtube_cookies_file()
+    if cookies_file is not None:
+        return ["--cookies", str(cookies_file)]
+    if browser:
+        return ["--cookies-from-browser", browser]
+    return []
+
+
+def is_bot_check_error(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker.lower() in lowered for marker in _BOT_CHECK_MARKERS)
+
+
+def bot_check_hint(browser: str = "") -> str:
+    """Hướng dẫn khắc phục lỗi bot-check của YouTube, tùy theo cách đã thử."""
+    if youtube_cookies_file() is not None:
+        return (
+            "YouTube vẫn chặn dù đã có cookies.txt: mở YouTube trên trình duyệt đã "
+            "xuất cookie, đăng nhập lại nếu bị đăng xuất, xuất lại file cookies.txt "
+            "mới (extension Get cookies.txt LOCALLY, tick youtube.com) rồi upload lại. "
+            "Nếu vừa đổi IP/VPN hoặc xác minh nhiều lần, chờ một lúc rồi thử lại."
+        )
+    if browser:
+        return (
+            f"Không đọc được phiên YouTube từ {browser} (trình duyệt khóa cookie, "
+            "chưa đăng nhập YouTube, hoặc backend chạy user khác). Cách chắc chắn: "
+            "xuất file cookies.txt từ trình duyệt đã đăng nhập YouTube rồi upload "
+            "ở mục Cookie YouTube — backend sẽ ưu tiên dùng file này."
+        )
+    return (
+        "Video này yêu cầu đăng nhập YouTube (bot-check). Chọn trình duyệt đã "
+        "đăng nhập YouTube ở mục Cookie, hoặc upload file cookies.txt xuất từ "
+        "trình duyệt đó rồi chạy lại."
+    )
+
+
+def yt_dlp_command() -> list[str]:
+    """Use the backend's Python environment even when its bin directory is not in PATH."""
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
+    executable = shutil.which("yt-dlp")
+    if executable:
+        return [executable]
+    install = shlex.join([
+        sys.executable, "-m", "pip", "install", "-r", str(settings.base_dir / "requirements.txt"),
+    ])
+    raise RuntimeError(f"Chưa cài yt-dlp trong môi trường backend. Chạy: {install}")
 
 
 def safe_name(name: str) -> str:
@@ -80,7 +160,8 @@ def _challenge_solver_arg() -> list[str]:
     return ["--remote-components", "ejs:github"]
 
 
-def download_video(video_id: str, quality: str = "best") -> Path:
+def download_video(video_id: str, quality: str = "best", cookies_from_browser: str = "") -> Path:
+    command = yt_dlp_command()
     out_dir = settings.temp_dir / "videos"
     out_dir.mkdir(parents=True, exist_ok=True)
     # Dọn file cũ của cùng video để không trả nhầm bản cũ.
@@ -94,11 +175,12 @@ def download_video(video_id: str, quality: str = "best") -> Path:
     template = str(out_dir / f"{video_id}.%(ext)s")
     url = f"https://www.youtube.com/watch?v={video_id}"
     base = [
-        "yt-dlp",
+        *command,
         "--no-playlist",
         "--merge-output-format", "mp4",
         "--retries", "3",
         "--fragment-retries", "3",
+        *cookies_args(cookies_from_browser),
         *_js_runtime_arg(),
         *_challenge_solver_arg(),
         "-o", template,
@@ -121,7 +203,9 @@ def download_video(video_id: str, quality: str = "best") -> Path:
         last_err = (proc.stderr or proc.stdout or "")[-800:]
     else:
         msg = f"Tải video thất bại: {last_err}"
-        if not _has_js_runtime():
+        if is_bot_check_error(last_err):
+            msg += f" | {bot_check_hint(cookies_from_browser)}"
+        elif not _has_js_runtime():
             msg += (
                 " | Thiếu JS runtime (yt-dlp cần để giải mã formats YouTube 2026): "
                 "cài Deno (`brew install deno`) hoặc Node (`brew install node`) rồi thử lại."

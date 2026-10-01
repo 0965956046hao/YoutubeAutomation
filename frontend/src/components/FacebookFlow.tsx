@@ -3,19 +3,44 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig, CookieBrowser, FacebookFlowTask, VideoItem,
-  analyzeLink, createFacebookFlow, createFacebookFlows, deleteFacebookFlow, formatDate, getConfig, getRecent, getVideoDetail,
+  analyzeLink, cancelFacebookFlow, createFacebookFlow, createFacebookFlows, deleteFacebookFlow, formatDate, getConfig, getRecent, getVideoDetail,
   listFacebookFlows, lowThumbnailUrl, resumeFacebookFlow, setFacebookFlowThumbnail, thumbnailUrl,
 } from "@/lib/api";
+import YoutubeCookies from "@/components/YoutubeCookies";
 
 const STATUS: Record<FacebookFlowTask["status"], string> = {
   queued: "Đang chờ", checking: "Kiểm tra Page", downloading: "Tải YouTube",
   analyzing: "Tìm khoảng lặng", cutting: "Cắt video", uploading: "Upload Facebook",
   processing: "Facebook xử lý", publishing: "Đang đăng", done: "Đã đăng", error: "Có lỗi",
+  cancelling: "Đang hủy…", cancelled: "Đã hủy",
 };
+
+function isActive(task: FacebookFlowTask) {
+  return !["done", "error", "cancelled"].includes(task.status);
+}
 
 function clock(seconds: number) {
   const rounded = Math.round(seconds);
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
+function FlowProgress({ task }: { task: FacebookFlowTask }) {
+  const downloading = task.status === "downloading";
+  const progress = Math.max(0, Math.min(100, downloading ? task.download_progress ?? 0 : task.progress));
+  const label = downloading ? "Tải từ YouTube" : "Tiến độ toàn bộ flow";
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-ink-muted">
+        <span>{label}</span>
+        <span className="tag tabular-nums !text-accent-light">{progress.toFixed(downloading ? 1 : 0)}%</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-white/10" role="progressbar"
+        aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+        <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${progress}%` }} />
+      </div>
+      {downloading && <p className="mt-1.5 text-[11px] text-ink-light">Tiến độ luồng đang tải; video và âm thanh có thể tải riêng trước khi ghép.</p>}
+    </div>
+  );
 }
 
 function captionPreview(title: string, description: string, tags: string[], videoId: string) {
@@ -180,7 +205,7 @@ export default function FacebookFlow({
     }
   }
   const activeForSource = tasks.some((task) => task.video_id === source?.video_id &&
-    task.page_id === config?.facebook_page_id && task.status !== "done" && task.status !== "error");
+    task.page_id === config?.facebook_page_id && isActive(task));
 
   async function start() {
     if (!source) return;
@@ -202,11 +227,13 @@ export default function FacebookFlow({
     }
   }
 
-  async function taskAction(taskId: string, action: "resume" | "delete" | "thumbnail") {
+  async function taskAction(taskId: string, action: "resume" | "delete" | "thumbnail" | "cancel") {
     setPendingTask(taskId);
     setError("");
+    setNotice("");
     try {
       if (action === "resume") await resumeFacebookFlow(taskId);
+      else if (action === "cancel") await cancelFacebookFlow(taskId);
       else if (action === "thumbnail") {
         await setFacebookFlowThumbnail(taskId);
         setNotice("Đã đặt thumbnail YouTube làm ảnh bìa video Facebook.");
@@ -375,6 +402,7 @@ export default function FacebookFlow({
                   </select>
                 </label>
               </div>
+              <YoutubeCookies />
               <div className="flex flex-wrap items-center gap-3">
                 <button className="btn-island-primary btn-sm" disabled={starting || loading || !configured || activeForSource}>
                   {starting ? "Đang tạo flow…" : activeForSource ? "Video này đang có flow chạy" : "Tải → Cắt → Đăng Facebook"}
@@ -406,9 +434,7 @@ export default function FacebookFlow({
               </div>
               <span className={`tag ${task.status === "error" ? "!text-red-300" : "!text-accent-light"}`}>{STATUS[task.status]}</span>
             </div>
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label="Tiến độ các bước" aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}>
-              <div className="h-full bg-accent transition-all" style={{ width: `${task.progress}%` }} />
-            </div>
+            <FlowProgress task={task} />
             <p className="mt-2 text-[12px] text-ink-muted">{task.message}</p>
             {task.cut && <p className="mt-2 text-[12px] text-ink-muted">Điểm cắt: <b className="text-ink">{clock(task.cut.seconds)}</b> / {clock(task.cut.source_duration)} · {task.cut.reason}</p>}
             {task.error && <p className="mt-2 whitespace-pre-wrap break-words text-[12px] text-red-300">{task.error}</p>}
@@ -416,10 +442,15 @@ export default function FacebookFlow({
             {task.comment_error && <p className="mt-2 whitespace-pre-wrap break-words text-[12px] text-red-300">{task.comment_error} Đăng tay trong Studio.</p>}
             <div className="mt-3 flex flex-wrap gap-2">
               {task.facebook_url && <a className="btn-island-secondary btn-xs" href={task.facebook_url} target="_blank" rel="noreferrer">Kiểm tra video Facebook ↗</a>}
-              {!task.thumbnail_set && task.thumbnail_ready && task.facebook_video_id && <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "thumbnail")} title="Đặt thumbnail YouTube làm ảnh bìa video Facebook">Đặt ảnh bìa YT</button>}
+              {task.status === "error" && !task.thumbnail_set && task.thumbnail_ready && task.facebook_video_id && <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "thumbnail")} title="Đặt thumbnail YouTube làm ảnh bìa video Facebook">Đặt ảnh bìa YT</button>}
               {task.can_resume && <button className="btn-island-primary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "resume")}>Tiếp tục video đã upload</button>}
               {task.clip_ready && <a className="btn-island-secondary btn-xs" href={`/api/facebook/flows/${task.task_id}/clip`} download>Tải video đã cắt</a>}
-              {task.status === "error" && <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "delete")}>Xóa file &amp; lịch sử local</button>}
+              {isActive(task) && <button className="btn-island-danger btn-xs" disabled={Boolean(pendingTask) || task.status === "cancelling"}
+                onClick={() => taskAction(task.task_id, "cancel")}>{task.status === "cancelling" ? "Đang hủy…" : "Hủy"}</button>}
+              <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask) || task.delete_requested}
+                onClick={() => taskAction(task.task_id, "delete")} title="Dừng tác vụ, xóa file và lịch sử trên máy">
+                {task.delete_requested ? "Đang hủy & xóa…" : isActive(task) ? "Hủy & xóa" : "Xóa file & lịch sử local"}
+              </button>
             </div>
             {task.clip_ready && (
               <details className="mt-3 text-[12px] text-ink-muted">

@@ -131,6 +131,61 @@ def video_update(video_id: str, body: VideoUpdateIn) -> dict:
         raise HTTPException(502, f"Cập nhật thất bại: {e}")
 
 
+@router.get("/youtube/cookies/status")
+def youtube_cookies_status() -> dict:
+    """Kiểm tra file cookies.txt đã upload (dùng chung cho mọi lượt tải)."""
+    from app.services.downloader import cookies_path
+
+    path = cookies_path()
+    try:
+        if path.is_file():
+            stat = path.stat()
+            if stat.st_size > 0:
+                return {"has_cookies": True, "size": stat.st_size, "mtime": stat.st_mtime}
+    except OSError:
+        pass
+    return {"has_cookies": False, "size": 0, "mtime": 0}
+
+
+@router.post("/youtube/cookies", status_code=201)
+async def upload_youtube_cookies(file: UploadFile = File(...)) -> dict:
+    """Upload file cookies.txt (Netscape) xuất từ trình duyệt đã login YouTube."""
+    from app.services.downloader import cookies_path
+
+    path = cookies_path()
+
+    raw = await file.read()
+    if not raw or len(raw) > 1024 * 1024:
+        raise HTTPException(400, "File cookie rỗng hoặc quá lớn (tối đa 1MB).")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "File cookie phải là text (cookies.txt Netscape).")
+    lowered = text.lower()
+    if "youtube.com" not in lowered:
+        raise HTTPException(400, "File này không chứa cookie youtube.com — hãy xuất lại từ youtube.com.")
+    if "netscape http cookie file" not in lowered and "#httponly" not in lowered and "\t.youtube.com" not in lowered:
+        raise HTTPException(400, "File không đúng định dạng Netscape cookies.txt.")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    except OSError as e:
+        raise HTTPException(500, f"Không lưu được cookie: {e}")
+    return {"status": "ok", "size": len(raw)}
+
+
+@router.delete("/youtube/cookies")
+def delete_youtube_cookies() -> dict:
+    from app.services.downloader import cookies_path
+
+    try:
+        cookies_path().unlink(missing_ok=True)
+    except OSError as e:
+        raise HTTPException(500, f"Không xóa được cookie: {e}")
+    return {"status": "ok"}
+
+
 @router.post("/videos/{video_id}/download-tasks")
 def create_download_task(
     video_id: str,

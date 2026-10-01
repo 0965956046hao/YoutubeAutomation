@@ -13,6 +13,7 @@ from typing import Callable
 
 import httpx
 
+from app.services.cancellation import Cancellation, CancellableReader
 
 BLOCKED_COMMENT_TEMPLATE = (
     "Do video đã bị YT block ad phải che toàn bộ nội dung nên mng ghé phở bò của ad để xem full nha: {facebook_url}\n"
@@ -45,7 +46,8 @@ def build_caption(description: str, tags: list[str], *, title: str, video_id: st
 
 
 class FacebookClient:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, cancel: Cancellation | None = None):
+        self.cancel = cancel or Cancellation()
         self.page_id = config.get("facebook_page_id", "")
         self.token = config.get("facebook_page_token", "")
         version = config.get("facebook_api_version", "v25.0")
@@ -67,11 +69,13 @@ class FacebookClient:
         self.http.close()
 
     def request(self, method: str, path: str, *, upload: bool = False, **kwargs) -> dict:
+        self.cancel.check()
         try:
             response = self.http.request(
                 method, f"{self.video_graph if upload else self.graph}/{path}", **kwargs,
             )
         except httpx.HTTPError as exc:
+            self.cancel.check()
             raise RuntimeError("Mất kết nối Facebook. Trạng thái sẽ giữ lại để kiểm tra/tiếp tục.") from exc
         try:
             data = response.json()
@@ -101,6 +105,7 @@ class FacebookClient:
         start, end = int(data["start_offset"]), int(data["end_offset"])
         with path.open("rb") as source:
             while start != end:
+                self.cancel.check()
                 if not 0 <= start < end <= size:
                     raise RuntimeError("Facebook trả về khoảng upload không hợp lệ.")
                 # Stream each server-requested chunk; large chunks spill to disk.
@@ -108,6 +113,7 @@ class FacebookClient:
                     source.seek(start)
                     remaining = end - start
                     while remaining:
+                        self.cancel.check()
                         block = source.read(min(1024 * 1024, remaining))
                         if not block:
                             raise RuntimeError("File video bị thiếu dữ liệu khi upload.")
@@ -117,7 +123,7 @@ class FacebookClient:
                     data = self.request("POST", route, upload=True, data={
                         "upload_phase": "transfer", "upload_session_id": session_id,
                         "start_offset": str(start),
-                    }, files={"video_file_chunk": ("chunk.mp4", chunk, "application/octet-stream")})
+                    }, files={"video_file_chunk": ("chunk.mp4", CancellableReader(chunk, self.cancel), "application/octet-stream")})
                 next_start, next_end = int(data["start_offset"]), int(data["end_offset"])
                 if next_start <= start or not 0 <= next_start <= next_end <= size:
                     raise RuntimeError("Facebook không xác nhận tiến độ upload.")
@@ -128,6 +134,8 @@ class FacebookClient:
         self.request("POST", route, upload=True, data={
             "upload_phase": "finish", "upload_session_id": session_id,
             "title": title, "description": caption, "published": "false",
+            # Declare AI content on the Page /videos upload before publication.
+            "is_ai_generated": "true",
         })
         update(upload_finished=True, status="processing", progress=90, message="Facebook đang xử lý video…")
         return video_id
@@ -144,13 +152,13 @@ class FacebookClient:
                 return data
             if status in ("error", "expired"):
                 raise RuntimeError(f"Facebook xử lý video thất bại: {status}.")
-            time.sleep(10)
+            self.cancel.wait(10)
         raise RuntimeError("Facebook chưa xử lý xong sau 120 phút. Bấm Tiếp tục để kiểm tra lại video đã upload.")
 
     def set_thumbnail(self, video_id: str, thumbnail: Path) -> None:
         with thumbnail.open("rb") as source:
             self.request("POST", f"{video_id}/thumbnails", data={"is_preferred": "true"},
-                         files={"source": ("thumbnail.jpg", source, "image/jpeg")})
+                         files={"source": ("thumbnail.jpg", CancellableReader(source, self.cancel), "image/jpeg")})
 
     def publish(self, video_id: str) -> None:
         self.request("POST", video_id, data={"published": "true"})

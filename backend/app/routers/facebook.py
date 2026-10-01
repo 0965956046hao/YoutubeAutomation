@@ -53,6 +53,14 @@ def resume_flow(task_id: str) -> dict:
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/facebook/flows/{task_id}/cancel", status_code=202)
+def cancel_flow(task_id: str) -> dict:
+    try:
+        return facebook_flow.cancel_task(task_id)
+    except KeyError:
+        raise HTTPException(404, "Không tìm thấy flow.")
+
+
 @router.post("/facebook/flows/{task_id}/thumbnail", status_code=202)
 def set_flow_thumbnail(task_id: str) -> dict:
     """Đặt (bù) thumbnail YouTube làm ảnh bìa video Facebook của flow."""
@@ -73,12 +81,12 @@ def flow_artifact(task_id: str, name: str) -> FileResponse:
     return FileResponse(path, filename=filename, media_type="video/mp4" if name == "clip" else "image/jpeg")
 
 
-@router.delete("/facebook/flows/{task_id}")
+@router.delete("/facebook/flows/{task_id}", status_code=202)
 def delete_flow(task_id: str) -> dict:
     try:
-        facebook_flow.delete_task(task_id)
+        result = facebook_flow.delete_task(task_id)
     except KeyError:
         raise HTTPException(404, "Không tìm thấy flow.")
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"status": "ok"}
+    return {"status": result["status"]}

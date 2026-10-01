@@ -3,10 +3,14 @@
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 import httpx
 from fastapi import FastAPI
@@ -15,9 +19,10 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.models import FacebookFlowIn
 from app.routers import config_router, facebook
-from app.services import facebook_flow, store
+from app.services import downloader, facebook_flow, store
+from app.services.cancellation import Cancellation, CancelledError
 from app.services.facebook_client import FacebookClient, build_blocked_comment, build_caption
-from app.services.quiet_cut import cut_video, find_cut, probe_video, quiet_intervals
+from app.services.quiet_cut import cut_video, find_cut, probe_video, quiet_intervals, run_media
 
 
 class QuietCutTests(unittest.TestCase):
@@ -64,7 +69,7 @@ class FacebookClientTests(unittest.TestCase):
             "Ủng hộ ad 1 like và 1 cmt giúp kênh phát triển hơn nha !!!",
         )
 
-    def test_resumable_upload_is_unpublished_and_streams_chunks(self):
+    def test_resumable_upload_declares_ai_before_publication_and_streams_chunks(self):
         calls = []
         def handle(request):
             body = request.read()
@@ -86,11 +91,45 @@ class FacebookClientTests(unittest.TestCase):
             video_id = client.upload(path, "Title", "Description #tag", lambda **fields: updates.append(fields))
             self.assertEqual(video_id, "123")
             self.assertEqual(len(calls), 4)
-            self.assertIn(b"published=false", calls[-1][1])
+            self.assertEqual(calls[-1][0], "/v25.0/456/videos")
+            self.assertEqual(parse_qs(calls[-1][1].decode()), {
+                "upload_phase": ["finish"], "upload_session_id": ["session"],
+                "title": ["Title"], "description": ["Description #tag"],
+                "published": ["false"], "is_ai_generated": ["true"],
+            })
             self.assertIn(b"abcd", calls[1][1])
             self.assertIn(b"efgh", calls[2][1])
             self.assertTrue(updates[-1]["upload_finished"])
             self.assertEqual(updates[0]["facebook_video_id"], "123")
+
+    def test_ai_declaration_rejection_does_not_finish_or_retry_without_label(self):
+        finish_requests = []
+        def handle(request):
+            body = request.read()
+            if b"upload_phase=start" in body:
+                return httpx.Response(200, json={
+                    "video_id": "123", "upload_session_id": "session",
+                    "start_offset": "0", "end_offset": "4",
+                })
+            if b"video_file_chunk" in body:
+                return httpx.Response(200, json={"start_offset": "4", "end_offset": "4"})
+            finish_requests.append(parse_qs(body.decode()))
+            return httpx.Response(400, json={"error": {
+                "code": 100, "message": "Invalid parameter: is_ai_generated",
+            }})
+        with tempfile.TemporaryDirectory() as temp, FacebookClient({
+            "facebook_page_id": "456", "facebook_page_token": "test-token",
+        }) as client:
+            client.http.close()
+            client.http = httpx.Client(transport=httpx.MockTransport(handle))
+            path = Path(temp) / "video.mp4"
+            path.write_bytes(b"abcd")
+            updates = []
+            with self.assertRaisesRegex(RuntimeError, "is_ai_generated"):
+                client.upload(path, "Title", "Description", lambda **fields: updates.append(fields))
+            self.assertEqual(len(finish_requests), 1)
+            self.assertEqual(finish_requests[0]["is_ai_generated"], ["true"])
+            self.assertFalse(any(update.get("upload_finished") for update in updates))
 
     def test_page_token_mismatch_and_secret_redaction(self):
         with FacebookClient({"facebook_page_id": "456", "facebook_page_token": "sensitive"}) as client:
@@ -107,6 +146,111 @@ class FacebookClientTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"bad \[hidden\]"):
                 client.check_page()
 
+    def test_cancellation_after_transfer_prevents_finish_and_publish(self):
+        cancel = Cancellation()
+        calls = []
+        def handle(request):
+            body = request.read()
+            calls.append(body)
+            if b"upload_phase=start" in body:
+                return httpx.Response(200, json={
+                    "video_id": "123", "upload_session_id": "session",
+                    "start_offset": "0", "end_offset": "4",
+                })
+            cancel.cancel()
+            return httpx.Response(200, json={"start_offset": "4", "end_offset": "4"})
+        with tempfile.TemporaryDirectory() as temp, FacebookClient({
+            "facebook_page_id": "456", "facebook_page_token": "test-token",
+        }, cancel=cancel) as client:
+            client.http.close()
+            client.http = httpx.Client(transport=httpx.MockTransport(handle))
+            path = Path(temp) / "video.mp4"
+            path.write_bytes(b"abcd")
+            with self.assertRaises(CancelledError):
+                client.upload(path, "Title", "Caption", lambda **_: None)
+            with self.assertRaises(CancelledError):
+                client.publish("123")
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(any(b"upload_phase=finish" in body for body in calls))
+
+    def test_cancellation_interrupts_facebook_processing_wait(self):
+        cancel = Cancellation()
+        with FacebookClient({"facebook_page_id": "456", "facebook_page_token": "test-token"}, cancel=cancel) as client:
+            def status(_):
+                cancel.cancel()
+                return {"status": {"video_status": "processing"}}
+            with patch.object(client, "video_status", side_effect=status) as request:
+                with self.assertRaises(CancelledError):
+                    client.wait_ready("123")
+            self.assertEqual(request.call_count, 1)
+
+
+class DownloadProgressTests(unittest.TestCase):
+    def test_cancel_stops_live_download_without_waiting_for_timeout(self):
+        cancel = Cancellation()
+        def report(_):
+            cancel.cancel()
+        with self.assertRaises(CancelledError):
+            facebook_flow._run_download([
+                sys.executable, "-u", "-c",
+                "import time; print('[download] 25.0%', flush=True); time.sleep(30)",
+            ], report, timeout=5, cancel=cancel)
+        self.assertFalse(cancel._processes)
+
+    def test_cancel_stops_media_process_without_progress_output(self):
+        cancel = Cancellation()
+        started = threading.Event()
+        original_attach = cancel.attach
+        def attach(proc):
+            original_attach(proc)
+            started.set()
+        with patch.object(cancel, "attach", side_effect=attach), ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run_media, [sys.executable, "-c", "import time; time.sleep(30)"], 5, cancel=cancel)
+            self.assertTrue(started.wait(2))
+            cancel.cancel()
+            with self.assertRaises(CancelledError):
+                future.result(timeout=2)
+        self.assertFalse(cancel._processes)
+
+    def test_progress_is_reported_before_process_finishes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            acknowledgement = Path(temp) / "progress-received"
+            script = (
+                "import pathlib, sys, time\n"
+                "ack = pathlib.Path(sys.argv[1])\n"
+                "print('[download] 25.5%', flush=True)\n"
+                "deadline = time.monotonic() + 3\n"
+                "while not ack.exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "if not ack.exists(): sys.exit(1)\n"
+                "print('[download] 100.0%')\n"
+                "print('[download] NA%')\n"
+                "print('[download] 4.0%')\n"
+                "print('[download] 101.0%')\n"
+                "print('[Merger] Merging formats')\n"
+            )
+            updates = []
+            def report(percent):
+                updates.append(percent)
+                acknowledgement.touch()
+            facebook_flow._run_download(
+                [sys.executable, "-u", "-c", script, str(acknowledgement)], report, timeout=5,
+            )
+            self.assertEqual(updates, [25.5, 100.0, 4.0, 100.0])
+
+    def test_download_timeout_stops_process(self):
+        with self.assertRaisesRegex(RuntimeError, "vượt quá thời gian"):
+            facebook_flow._run_download(
+                [sys.executable, "-c", "import time; time.sleep(30)"], lambda _: None, timeout=0.2,
+            )
+
+    def test_download_failure_retains_error_output(self):
+        with self.assertRaisesRegex(RuntimeError, "ERROR: download denied"):
+            facebook_flow._run_download([
+                sys.executable, "-c",
+                "import sys; print('ERROR: download denied', file=sys.stderr); sys.exit(1)",
+            ], lambda _: None)
+
 
 class FlowTests(unittest.TestCase):
     def setUp(self):
@@ -119,6 +263,9 @@ class FlowTests(unittest.TestCase):
         self.tasks_patch = patch.dict(facebook_flow._tasks, clear=True)
         self.tasks_patch.start()
         self.addCleanup(self.tasks_patch.stop)
+        self.running_patch = patch.dict(facebook_flow._running, clear=True)
+        self.running_patch.start()
+        self.addCleanup(self.running_patch.stop)
         self.config_patch = patch.object(store, "CONFIG_PATH", temp_path / "config.json")
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
@@ -167,6 +314,170 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(facebook_flow.get_task(task_id)["status"], "done")
         self.assertTrue(facebook_flow.get_task(task_id)["thumbnail_set"])
         self.assertEqual(facebook_flow.get_task(task_id)["facebook_url"], "https://www.facebook.com/video/123")
+
+    def test_download_progress_is_exposed_and_resets_on_retry(self):
+        task_id = self._task()
+        directory = settings.temp_dir / "facebook_flows" / task_id
+        facebook_flow._update(task_id, status="downloading", progress=5)
+        app = FastAPI()
+        app.include_router(facebook.router)
+        client = TestClient(app)
+        observed = []
+        attempts = []
+        def run(command, report, **_kwargs):
+            attempts.append(command)
+            # Each fallback starts at zero, rather than keeping the previous percentage.
+            self.assertEqual(facebook_flow.get_task(task_id)["download_progress"], 0)
+            percent = 62.5 if len(attempts) == 1 else 18.2
+            report(percent)
+            task = client.get("/facebook/flows").json()["active"][0]
+            observed.append(task["download_progress"])
+            self.assertIn(f"{percent:.1f}%", task["message"])
+            self.assertEqual(task["progress"], 5)  # Download percentage is separate from overall flow.
+            if len(attempts) == 1:
+                raise RuntimeError("First player failed")
+            (directory / "source.mp4").write_bytes(b"video")
+        with patch.object(facebook_flow, "_run_download", side_effect=run), \
+             patch.object(facebook_flow, "yt_dlp_command", return_value=[sys.executable, "-m", "yt_dlp"]):
+            result = facebook_flow._download("dQw4w9WgXcQ", directory, "chrome", task_id)
+        self.assertEqual(result, directory / "source.mp4")
+        self.assertEqual(observed, [62.5, 18.2])
+        self.assertEqual(attempts[0][:3], [sys.executable, "-m", "yt_dlp"])
+        self.assertIn("--progress", attempts[0])
+        self.assertIn("--newline", attempts[0])
+        self.assertIn("--cookies-from-browser", attempts[0])
+        self.assertIn("youtube:player_client=android", attempts[1])
+        self.assertEqual(facebook_flow.get_task(task_id)["download_progress"], 100)
+
+    def test_cancel_queued_task_keeps_history_and_never_starts(self):
+        task_id = self._task()
+        facebook_flow._update(task_id, status="queued")
+        app = FastAPI()
+        app.include_router(facebook.router)
+        client = TestClient(app)
+        response = client.post(f"/facebook/flows/{task_id}/cancel")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "cancelled")
+        self.assertEqual(response.json()["queue_position"], 0)
+        self.assertFalse(response.json()["can_resume"])
+        with patch.object(facebook_flow, "FacebookClient") as facebook_client:
+            facebook_flow._run(task_id, {})
+        facebook_client.assert_not_called()
+        self.assertTrue((facebook_flow._directory(task_id) / "task.json").is_file())
+        # Cancellation stays terminal after restarting, even with an uploaded video ID.
+        facebook_flow._tasks.clear()
+        facebook_flow.restore_tasks()
+        self.assertEqual(facebook_flow.get_task(task_id)["status"], "cancelled")
+
+    def test_delete_queued_task_removes_files_and_pending_worker_is_noop(self):
+        task_id = self._task()
+        facebook_flow._update(task_id, status="queued")
+        directory = facebook_flow._directory(task_id)
+        (directory / "source.mp4.part").write_bytes(b"partial")
+        app = FastAPI()
+        app.include_router(facebook.router)
+        client = TestClient(app)
+        self.assertEqual(client.delete(f"/facebook/flows/{task_id}").json()["status"], "deleted")
+        self.assertFalse(directory.exists())
+        with patch.object(facebook_flow, "FacebookClient") as facebook_client:
+            facebook_flow._run(task_id, {})
+        facebook_client.assert_not_called()
+        self.assertIsNone(facebook_flow.get_task(task_id))
+        self.assertEqual(client.post(f"/facebook/flows/{task_id}/cancel").status_code, 404)
+
+    def test_cancel_running_worker_defers_delete_and_continues_queue(self):
+        for delete in (False, True):
+            with self.subTest(delete=delete):
+                task_id = self._task()
+                facebook_flow._update(task_id, status="queued")
+                directory = facebook_flow._directory(task_id)
+                entered = threading.Event()
+                release = threading.Event()
+                calls = []
+                class FakeFacebook:
+                    def __init__(self, config, *, cancel):
+                        self.cancel = cancel
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *_):
+                        pass
+                    def check_page(self):
+                        return {"name": "Test Page"}
+                    def wait_ready(self, _):
+                        entered.set()
+                        # Simulate an HTTP request already in flight when cancellation arrives.
+                        if not release.wait(5):
+                            raise RuntimeError("Test request timed out")
+                        self.cancel.check()
+                    def publish(self, _):
+                        calls.append("publish")
+                app = FastAPI()
+                app.include_router(facebook.router)
+                client = TestClient(app)
+                with patch.object(facebook_flow, "FacebookClient", FakeFacebook), ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(facebook_flow._run, task_id, {}, True)
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        response = (client.delete(f"/facebook/flows/{task_id}") if delete else
+                                    client.post(f"/facebook/flows/{task_id}/cancel"))
+                        self.assertEqual(response.status_code, 202)
+                        self.assertEqual(facebook_flow.get_task(task_id)["status"], "cancelling")
+                        self.assertTrue(directory.exists())
+                        # Late HTTP callbacks preserve IDs without replacing the cancellation state.
+                        with self.assertRaises(CancelledError):
+                            facebook_flow._update(task_id, status="done", facebook_video_id="late-id")
+                        self.assertEqual(facebook_flow.get_task(task_id)["facebook_video_id"], "late-id")
+                    finally:
+                        release.set()
+                    future.result(timeout=2)
+                    self.assertEqual(pool.submit(lambda: "next video").result(timeout=2), "next video")
+                self.assertEqual(calls, [])
+                self.assertNotIn(task_id, facebook_flow._running)
+                if delete:
+                    self.assertIsNone(facebook_flow.get_task(task_id))
+                    self.assertFalse(directory.exists())
+                else:
+                    self.assertEqual(facebook_flow.get_task(task_id)["status"], "cancelled")
+                    facebook_flow.delete_task(task_id)
+
+    def test_cleanup_failure_does_not_restart_queued_task(self):
+        task_id = self._task()
+        facebook_flow._update(task_id, status="queued")
+        with patch.object(shutil, "rmtree", side_effect=OSError("permission denied")):
+            with self.assertRaisesRegex(ValueError, "Không xóa được"):
+                facebook_flow.delete_task(task_id)
+        task = facebook_flow.get_task(task_id)
+        self.assertEqual(task["status"], "cancelled")
+        self.assertFalse(task["delete_requested"])
+        with patch.object(facebook_flow, "FacebookClient") as client:
+            facebook_flow._run(task_id, {})
+        client.assert_not_called()
+        facebook_flow.delete_task(task_id)
+        self.assertIsNone(facebook_flow.get_task(task_id))
+
+    def test_cancellation_during_download_does_not_retry(self):
+        task_id = self._task()
+        facebook_flow._update(task_id, status="downloading")
+        with patch.object(facebook_flow, "_run_download", side_effect=CancelledError) as download:
+            with self.assertRaises(CancelledError):
+                facebook_flow._download("dQw4w9WgXcQ", facebook_flow._directory(task_id), "", task_id)
+        self.assertEqual(download.call_count, 1)
+
+    def test_restart_completes_pending_cancel_and_delete(self):
+        task_id = self._task()
+        task = facebook_flow._tasks[task_id]
+        task.update(status="cancelling")
+        facebook_flow._save(task)
+        facebook_flow._tasks.clear()
+        facebook_flow.restore_tasks()
+        self.assertEqual(facebook_flow.get_task(task_id)["status"], "cancelled")
+        task = facebook_flow._tasks[task_id]
+        task.update(status="cancelling", delete_requested=True)
+        facebook_flow._save(task)
+        facebook_flow._tasks.clear()
+        facebook_flow.restore_tasks()
+        self.assertIsNone(facebook_flow.get_task(task_id))
+        self.assertFalse(facebook_flow._directory(task_id).exists())
 
     def test_publish_skips_thumbnail_when_already_set(self):
         task_id = self._task()
@@ -302,7 +613,8 @@ class FlowTests(unittest.TestCase):
             FacebookFlowIn(video_id="9bZkp7q19f0"),
             FacebookFlowIn(video_id="dQw4w9WgXcQ"),
         ]
-        with patch.object(facebook_flow._pool, "submit", return_value=None):
+        with patch.object(facebook_flow._pool, "submit", return_value=None), \
+             patch.object(shutil, "which", side_effect=lambda tool: f"/usr/bin/{tool}"):
             result = facebook_flow.create_tasks(bodies, page_id="456")
         self.assertEqual(result["count"], 2)
         self.assertEqual(len(result["skipped"]), 1)
@@ -320,6 +632,18 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(len(payload["active"]), 1)
         self.assertEqual(len(payload["uploaded"]), 1)
         self.assertEqual(payload["uploaded"][0]["task_id"], done_id)
+
+    def test_full_video_can_be_queued_when_yt_dlp_is_only_in_python_environment(self):
+        store.save_config({"facebook_page_id": "456", "facebook_page_token": "secret"})
+        with patch.object(downloader.importlib.util, "find_spec", return_value=object()), \
+             patch.object(shutil, "which", side_effect=lambda tool: f"/usr/bin/{tool}" if tool in ("ffmpeg", "ffprobe") else None), \
+             patch.object(facebook_flow._pool, "submit", return_value=None):
+            result = facebook_flow.create_tasks([
+                FacebookFlowIn(video_id="dnSSVFL-iCg", full_video=True, comment_blocked=True),
+            ], page_id="456")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["tasks"][0]["status"], "queued")
 
 
 if __name__ == "__main__":

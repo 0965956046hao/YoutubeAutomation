@@ -274,13 +274,18 @@ kênh (channel ID `UC...` hoặc handle `@tenkenh`) → **Kết nối Google** �
 | GET/POST | `/api/facebook/flows` | Lịch sử / tạo flow YouTube → cắt → Facebook (chạy nền; GET tách `active` / `uploaded`) |
 | POST | `/api/facebook/flows/batch` | Thêm tối đa 20 video vào hàng đợi → `{tasks, skipped, count}` |
 | POST | `/api/facebook/flows/{task_id}/resume` | Kiểm tra và tiếp tục cùng video Facebook đã upload xong |
+| POST | `/api/facebook/flows/{task_id}/cancel` | Hủy tác vụ đang chờ/đang xử lý, giữ file và lịch sử local |
 | GET | `/api/facebook/flows/{task_id}/clip` | Tải MP4 đã cắt |
 | GET | `/api/facebook/flows/{task_id}/thumbnail` | Thumbnail gốc dùng cho flow |
-| DELETE | `/api/facebook/flows/{task_id}` | Xóa lịch sử và file local của flow đã dừng; không xóa bài Facebook |
+| DELETE | `/api/facebook/flows/{task_id}` | Hủy nếu đang chạy, rồi xóa lịch sử và file local khi worker dừng; không xóa bài Facebook |
 
 ## Flow YouTube → Facebook Page (khoảng 30 phút)
 
-1. Máy chạy backend cần **yt-dlp nightly, FFmpeg và ffprobe** trong `PATH`.
+1. Máy chạy backend cần **yt-dlp nightly, FFmpeg và ffprobe**. Backend ưu tiên
+   gọi `yt-dlp` bằng Python đang chạy ứng dụng (`python -m yt_dlp`), nên bản cài
+   trong `backend/.venv` vẫn hoạt động khi chạy `./dev.sh` mà chưa activate venv.
+   Nếu môi trường Python chưa có module, backend tìm lệnh `yt-dlp` trong `PATH`.
+   Riêng `ffmpeg` và `ffprobe` vẫn cần có trong `PATH`.
 2. Trong **Cấu hình → Facebook Page**, nhập Page ID dạng số, **Page access token**
    của chính Page đó và Graph API version (mặc định `v25.0`). Token cần quyền
    `pages_manage_posts`, `pages_read_engagement` và tài khoản có quyền tạo nội dung
@@ -296,11 +301,30 @@ kênh (channel ID `UC...` hoặc handle `@tenkenh`) → **Kết nối Google** �
    tự từng video (tải → tìm khoảng lặng → cắt → đăng), có số thứ tự
    `#1, #2…`; video trùng đang chạy bị bỏ qua và báo rõ trong thông báo.
    Tác vụ tiếp tục khi đổi tab hoặc đóng trình duyệt (backend vẫn phải chạy).
-   Cookie YouTube tùy chọn lấy từ trình duyệt trên máy backend, dành cho video
-   yêu cầu đăng nhập. **Video bị chặn/bản quyền (lỗi "The page needs to be
-   reloaded") gần như bắt buộc phải chọn cookie** trình duyệt đã đăng nhập
-   YouTube — app tự thử client thường rồi tới Android, kèm script giải
+   Trong bước **Tải YouTube**, card hiển thị phần trăm tải thực tế từ `yt-dlp`,
+   tự cập nhật mỗi 3 giây. Video và âm thanh có thể tải thành từng luồng riêng,
+   nên phần trăm có thể bắt đầu lại khi chuyển luồng hoặc thử lại cấu hình tải.
+   Sau khi tải/ghép xong, thanh tiến độ chuyển về tiến độ toàn bộ flow.
+   Cookie YouTube lấy từ file `cookies.txt` đã upload (khuyên dùng) hoặc từ
+   trình duyệt trên máy backend, dành cho video yêu cầu đăng nhập.
+   **Video bị chặn/bản quyền (lỗi "Sign in to confirm you're not a bot" hoặc
+   "The page needs to be reloaded") gần như bắt buộc phải có cookie** —
+   app tự thử client thường rồi tới Android, kèm script giải
    JS challenge (`--remote-components ejs:github`).
+
+### Cookie YouTube bằng file cookies.txt (khi gặp lỗi bot-check)
+
+1. Trên máy chạy backend, mở trình duyệt đã **đăng nhập YouTube** (nên dùng
+   Chrome profile chính, tắt VPN/proxy lạ).
+2. Cài extension **Get cookies.txt LOCALLY** → mở `youtube.com` → Export →
+   tick `youtube.com` → lưu file `cookies.txt`.
+3. Ở tab **Bị chặn** hoặc form **YT → Facebook**, mục **Cookie YouTube** →
+   **Upload cookies.txt**. Backend lưu tại `backend/temp/youtube_cookies.txt`
+   (gitignored) và **ưu tiên dùng file này** cho mọi lượt tải, thay vì đọc
+   trực tiếp cookie trình duyệt (hay bị khóa/hết hạn).
+4. Chạy lại video lỗi. Nếu vẫn báo bot-check: đăng nhập lại YouTube, xuất
+   file mới rồi upload lại; nếu vừa đổi IP/VPN hoặc xác minh nhiều lần, chờ
+   một lúc rồi thử lại.
 5. Mục **Đã upload** giữ các video đăng xong sau khi mở app lại: mở bài
    Facebook, xem lại video đã cắt và nội dung đã đăng, tải lại bản MP4.
    File cắt, thumbnail và lịch sử nằm trong
@@ -361,6 +385,39 @@ lại đúng Facebook video ID, không tạo bản upload mới. Nếu backend r
 flow đang chạy chuyển sang lỗi gián đoạn; không tự đăng lại. Lỗi trước khi
 upload hoàn tất cần kiểm tra video nháp trên Page trước khi tạo flow mới.
 Xóa lịch sử/file local không xóa video đã tạo trên Facebook.
+
+### Hủy và xóa tác vụ trong hàng đợi
+
+- **Hủy**: bỏ tác vụ đang chờ hoặc dừng tác vụ đang tải/cắt/upload/chờ Facebook
+  xử lý. Giữ file local và lịch sử với trạng thái **Đã hủy**.
+- **Hủy & xóa**: dừng tác vụ rồi xóa toàn bộ file và lịch sử local của clip.
+  Với tác vụ đã dừng, dùng **Xóa file & lịch sử local** để dọn ngay.
+- Khi worker đang chạy, card hiện **Đang hủy…**; tiến trình `yt-dlp`/FFmpeg được
+  dừng, upload kiểm tra hủy giữa các khối dữ liệu và các yêu cầu tới Facebook.
+  File chỉ được xóa sau khi worker đã thoát; hàng đợi tiếp tục video kế tiếp.
+- Một yêu cầu HTTP đang chờ phản hồi có thể cần thời gian để kết thúc hoặc hết
+  timeout. Nếu yêu cầu xuất bản đã gửi tới Meta, video có thể đã được đăng:
+  hủy/xóa ở đây chỉ quản lý flow và dữ liệu local, bài/nháp trên Facebook cần
+  kiểm tra và xóa trực tiếp trên Page hoặc Meta Business Suite.
+- Tác vụ đã hủy không tự chạy lại sau khi khởi động backend. Yêu cầu **Hủy & xóa**
+  đang chờ dọn file cũng được hoàn tất khi backend khởi động lại.
+
+### Nhãn nội dung AI trên Facebook
+
+Mọi video upload mới qua ứng dụng đều được khai báo **nội dung AI** với Meta
+bằng `is_ai_generated=true` ở bước hoàn tất upload (`upload_phase=finish`,
+`POST /{page_id}/videos`), trước khi xuất bản. Áp dụng cho cả video cắt,
+upload hàng loạt và upload full từ tab **Bị chặn**.
+
+Đây là tham số gắn nhãn của Facebook; cách hiển thị **AI info / Thông tin AI**
+trên bài đăng do Meta quyết định. Nếu API từ chối khai báo, flow báo lỗi và
+không chuyển sang bước xuất bản. Video đã upload trước khi cập nhật cần được
+kiểm tra/chỉnh nhãn trực tiếp trên Facebook hoặc Meta Business Suite.
+
+Tham số được khai báo trong
+[Meta Business SDK — Page.create_video](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/page.py).
+
+### Kiểm thử
 
 Kiểm tra offline (không đăng Facebook thật):
 

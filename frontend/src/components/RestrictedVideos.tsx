@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { startVideoDownload } from "@/lib/downloads";
 import { DownloadIcon } from "@/components/icons";
+import YoutubeCookies from "@/components/YoutubeCookies";
 
 type CookieBrowser = "chrome" | "firefox" | "safari" | "edge" | "brave";
 
@@ -166,6 +167,10 @@ export default function RestrictedVideos({
               </select>
             </label>
           </div>
+          <YoutubeCookies />
+          <p className="mt-2 text-[11px] text-ink-light">
+            Gặp lỗi &quot;Sign in to confirm you&apos;re not a bot&quot;? Upload cookies.txt ở trên rồi chạy lại — không cần đổi trình duyệt.
+          </p>
           {message && <p className="mt-3 text-[12px] text-accent-light">{message}</p>}
           {error && <p className="mt-3 text-[12px] text-red-300">{error}</p>}
         </div>

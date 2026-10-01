@@ -81,6 +81,29 @@ export async function getAuthUrl(): Promise<string> {
 
 export type CookieBrowser = "" | "chrome" | "firefox" | "safari" | "edge" | "brave";
 
+export interface YoutubeCookiesStatus {
+  has_cookies: boolean;
+  size: number;
+  mtime: number;
+}
+
+export async function getYoutubeCookiesStatus(): Promise<YoutubeCookiesStatus> {
+  return (await api.get<YoutubeCookiesStatus>("/youtube/cookies/status")).data;
+}
+
+export async function uploadYoutubeCookies(file: File): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  await api.post("/youtube/cookies", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 30000,
+  });
+}
+
+export async function deleteYoutubeCookies(): Promise<void> {
+  await api.delete("/youtube/cookies");
+}
+
 export interface FacebookFlowInput {
   video_id: string;
   title: string;
@@ -101,8 +124,9 @@ export interface FacebookFlowTask {
   title: string;
   page_id: string;
   page_name: string;
-  status: "queued" | "checking" | "downloading" | "analyzing" | "cutting" | "uploading" | "processing" | "publishing" | "done" | "error";
+  status: "queued" | "checking" | "downloading" | "analyzing" | "cutting" | "uploading" | "processing" | "publishing" | "done" | "error" | "cancelling" | "cancelled";
   progress: number;
+  download_progress?: number;
   message: string;
   error: string;
   created_at: number;
@@ -116,6 +140,7 @@ export interface FacebookFlowTask {
   comment_error?: string;
   can_resume: boolean;
   queue_position?: number;
+  delete_requested?: boolean;
   cut: { seconds: number; source_duration: number; reason: string } | null;
 }
 
@@ -141,6 +166,10 @@ export async function listFacebookFlows(): Promise<FacebookFlowTask[]> {
 
 export async function resumeFacebookFlow(taskId: string): Promise<FacebookFlowTask> {
   return (await api.post(`/facebook/flows/${taskId}/resume`)).data;
+}
+
+export async function cancelFacebookFlow(taskId: string): Promise<FacebookFlowTask> {
+  return (await api.post(`/facebook/flows/${taskId}/cancel`)).data;
 }
 
 export async function setFacebookFlowThumbnail(taskId: string): Promise<FacebookFlowTask> {

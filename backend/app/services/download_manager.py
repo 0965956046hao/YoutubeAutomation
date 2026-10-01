@@ -19,8 +19,12 @@ from app.services.downloader import (
     _challenge_solver_arg,
     _format_for,
     _js_runtime_arg,
+    bot_check_hint,
+    cookies_args,
+    is_bot_check_error,
     video_filename,
     video_title,
+    yt_dlp_command,
 )
 
 _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
@@ -150,18 +154,20 @@ def _run_task(task_id: str) -> None:
         cookies_from_browser = task.get("cookies_from_browser", "")
     _set(task_id, status="downloading", message="Đang tải từ YouTube…")
 
+    try:
+        command = yt_dlp_command()
+    except RuntimeError as exc:
+        _set(task_id, status="error", error=str(exc), message="Lỗi thiếu yt-dlp.")
+        return
+
     out_dir = settings.temp_dir / "videos"
     out_dir.mkdir(parents=True, exist_ok=True)
     fmt = _format_for(quality)
     template = str(out_dir / f"dl_{task_id}.%(ext)s")
     url = f"https://www.youtube.com/watch?v={video_id}"
-    cookie_args = (
-        ["--cookies-from-browser", cookies_from_browser]
-        if cookies_from_browser
-        else []
-    )
+    cookie_args = cookies_args(cookies_from_browser)
     base = [
-        "yt-dlp",
+        *command,
         "--no-playlist",
         "--merge-output-format", "mp4",
         "--retries", "3",
@@ -223,7 +229,10 @@ def _run_task(task_id: str) -> None:
         if proc.returncode == 0:
             break
     else:
-        if cookies_from_browser:
+        raw_err = last_err or "không rõ nguyên nhân"
+        if is_bot_check_error(raw_err):
+            last_err = f"{raw_err} | {bot_check_hint(cookies_from_browser)}"
+        elif cookies_from_browser:
             last_err += (
                 f" | Không đọc được phiên YouTube từ {cookies_from_browser}. "
                 "Hãy đăng nhập YouTube trên trình duyệt đó rồi thử lại."

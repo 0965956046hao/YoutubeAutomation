@@ -3,26 +3,19 @@
 import json
 import math
 import re
-import subprocess
 from pathlib import Path
 
-
-def run_media(command: list[str], timeout: int = 300) -> str:
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"Chưa cài {command[0]} (cài FFmpeg và yt-dlp).") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{command[0]} vượt quá thời gian xử lý.") from exc
-    if result.returncode:
-        raise RuntimeError(f"{command[0]} thất bại: {(result.stderr or result.stdout)[-1500:]}")
-    return result.stdout + "\n" + result.stderr
+from app.services.cancellation import Cancellation, run_process
 
 
-def probe_video(path: Path) -> dict:
+def run_media(command: list[str], timeout: int = 300, *, cancel: Cancellation | None = None) -> str:
+    return run_process(command, timeout, cancel=cancel)
+
+
+def probe_video(path: Path, *, cancel: Cancellation | None = None) -> dict:
     raw = run_media([
         "ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path),
-    ])
+    ], cancel=cancel)
     info = json.loads(raw)
     duration = float(info.get("format", {}).get("duration", 0))
     if not math.isfinite(duration) or duration <= 0:
@@ -52,8 +45,9 @@ def quiet_intervals(log: str, length: float) -> list[tuple[float, float]]:
 
 def find_cut(
     path: Path, target: float, window: float, noise_db: float, min_silence: float,
+    *, cancel: Cancellation | None = None,
 ) -> dict:
-    info = probe_video(path)
+    info = probe_video(path, cancel=cancel)
     duration = info["duration"]
     if duration <= target:
         return {"seconds": duration, "source_duration": duration, "reason": "Video ngắn hơn mốc cắt: giữ toàn bộ."}
@@ -65,7 +59,7 @@ def find_cut(
         "ffmpeg", "-hide_banner", "-nostdin", "-ss", str(start), "-i", str(path),
         "-t", str(length), "-map", "0:a:0", "-vn",
         "-af", f"silencedetect=noise={noise_db}dB:d={min_silence}", "-f", "null", "-",
-    ])
+    ], cancel=cancel)
     candidates = [start + (a + b) / 2 for a, b in quiet_intervals(log, length) if b - a >= min_silence]
     if not candidates:
         raise RuntimeError(
@@ -79,7 +73,7 @@ def find_cut(
     }
 
 
-def cut_video(source: Path, output: Path, seconds: float) -> None:
+def cut_video(source: Path, output: Path, seconds: float, *, cancel: Cancellation | None = None) -> None:
     # Re-encode rather than stream-copy: copying can move the cut to a keyframe.
     run_media([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source),
@@ -88,7 +82,7 @@ def cut_video(source: Path, output: Path, seconds: float) -> None:
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-threads", "2",
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", str(output),
-    ], timeout=7200)
-    actual = probe_video(output)["duration"]
+    ], timeout=7200, cancel=cancel)
+    actual = probe_video(output, cancel=cancel)["duration"]
     if abs(actual - seconds) > 1:
         raise RuntimeError("Thời lượng file đã cắt không khớp với điểm cắt đã chọn.")
