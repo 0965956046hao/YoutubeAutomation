@@ -102,6 +102,23 @@ def safe_title(name: str, max_len: int = 100) -> str:
     return cleaned[:max_len] or "video"
 
 
+_DOWNLOAD_BAD = re.compile(r'[\\/:*?"<>\x00-\x1f]+')
+
+
+def download_title(name: str, max_len: int = 100) -> str:
+    """Tên file gợi ý khi tải về qua browser: giữ dấu | theo yêu cầu user.
+
+    Chỉ bỏ ký tự nguy hiểm cho Content-Disposition/Windows (kể cả \r\n
+    chống header injection), giữ nguyên Unicode. Riêng | được đổi thành
+    ｜ (fullwidth) vì Chrome/Safari tự thay | bằng _ khi lưu file
+    (| là ký tự cấm tên file trên Windows nên browser sanitize mọi OS).
+    """
+    cleaned = _DOWNLOAD_BAD.sub(" ", name or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    cleaned = cleaned.replace("|", "｜")
+    return cleaned[:max_len] or "video"
+
+
 def video_title(video_id: str) -> str:
     """Lấy tên video qua oEmbed (nhẹ, không tốn quota, không cần auth)."""
     import httpx

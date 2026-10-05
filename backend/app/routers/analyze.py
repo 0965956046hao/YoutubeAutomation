@@ -222,6 +222,7 @@ def list_analyzed() -> dict:
                 ),
                 "has_ai": bool((data.get("ai") or {}).get("translation")),
                 "has_generated_thumbnail": (_analyzed_dir() / f"{info.get('video_id', f.stem)}.generated.png").exists(),
+                "has_cover": (_analyzed_dir() / f"{info.get('video_id', f.stem)}.cover.png").exists(),
                 "saved_at": data.get("saved_at", 0),
             })
         except Exception:
@@ -274,6 +275,8 @@ def get_analyzed(video_id: str) -> dict:
     data["generated_thumbnail"] = (
         f"/api/analyzed/{video_id}/generated-thumbnail" if generated.exists() else ""
     )
+    cover = _analyzed_dir() / f"{video_id}.cover.png"
+    data["cover"] = f"/api/analyzed/{video_id}/cover" if cover.exists() else ""
     return data
 
 
@@ -297,20 +300,27 @@ def get_analyzed_image(video_id: str):
 
 
 @router.post("/analyzed/{video_id}/generated-thumbnail")
-async def save_generated_thumbnail(video_id: str, file: UploadFile = File(...)) -> dict:
-    """Lưu ảnh ChatGPT tạo, tách biệt thumbnail gốc đã archive."""
+async def save_generated_thumbnail(video_id: str, file: UploadFile = File(...), slot: str = "") -> dict:
+    """Lưu ảnh ChatGPT tạo, tách biệt thumbnail gốc đã archive.
+
+    slot="cover": lưu ảnh bìa 1088×1446 cho Facebook flow
+    (analyzed/{video_id}.cover.png) thay vì thumbnail 16:9.
+    """
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
         raise HTTPException(400, "video_id không hợp lệ.")
+    if slot not in ("", "cover"):
+        raise HTTPException(400, "slot chỉ nhận '' hoặc 'cover'.")
     data = await file.read()
     if not data:
         raise HTTPException(400, "File ảnh trống.")
-    path = _analyzed_dir() / f"{video_id}.generated.png"
+    name = f"{video_id}.cover.png" if slot == "cover" else f"{video_id}.generated.png"
+    path = _analyzed_dir() / name
     tmp = path.with_suffix(".png.tmp")
     tmp.write_bytes(data)
     tmp.replace(path)
     return {
         "status": "done",
-        "url": f"/api/analyzed/{video_id}/generated-thumbnail",
+        "url": f"/api/analyzed/{video_id}/cover" if slot == "cover" else f"/api/analyzed/{video_id}/generated-thumbnail",
     }
 
 
@@ -321,6 +331,17 @@ def get_generated_thumbnail(video_id: str):
     path = _analyzed_dir() / f"{video_id}.generated.png"
     if not path.exists():
         raise HTTPException(404, "Chưa có thumbnail ChatGPT.")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/analyzed/{video_id}/cover")
+def get_cover(video_id: str):
+    """Ảnh bìa 1088×1446 ChatGPT đã gen cho Facebook flow."""
+    from fastapi.responses import FileResponse
+
+    path = _analyzed_dir() / f"{video_id}.cover.png"
+    if not path.exists():
+        raise HTTPException(404, "Chưa có ảnh bìa ChatGPT cho video này.")
     return FileResponse(path, media_type="image/png")
 
 

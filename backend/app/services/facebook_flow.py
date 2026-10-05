@@ -23,11 +23,12 @@ from app.services.downloader import (
     _js_runtime_arg,
     bot_check_hint,
     cookies_args,
+    download_title,
     is_bot_check_error,
-    safe_title,
     yt_dlp_command,
 )
 from app.services.facebook_client import FacebookClient, build_blocked_comment, build_caption
+from app.services.fb_assembly import assemble_intro_outro
 from app.services.quiet_cut import cut_video, find_cut, probe_video, run_media
 from app.services.youtube_client import get_video, post_comment
 
@@ -93,6 +94,7 @@ def _public(task: dict) -> dict:
     # thumbnail_set = đã đặt ảnh bìa lên video Facebook (cờ nội bộ, chỉ True sau khi API thành công).
     data["thumbnail_ready"] = bool((_directory(task["task_id"]) / "thumbnail.jpg").is_file())
     data["thumbnail_set"] = bool(task.get("thumbnail_set"))
+    data["cover_ready"] = bool((_directory(task["task_id"]) / "cover.jpg").is_file())
     data["can_resume"] = task["status"] == "error" and bool(task.get("upload_finished")) and task["task_id"] not in _running
     data["queue_position"] = _queue_positions().get(task["task_id"], 0)
     return data
@@ -222,12 +224,21 @@ def resume_task(task_id: str) -> dict:
 
 def artifact(task_id: str, name: str) -> tuple[Path, str] | None:
     task = get_task(task_id)
-    if not task or name not in ("clip", "thumbnail"):
+    if not task or name not in ("clip", "thumbnail", "cover"):
         return None
     if name == "clip" and not task["clip_ready"]:
         return None
-    path = _directory(task_id) / ("clip.mp4" if name == "clip" else "thumbnail.jpg")
-    return (path, f"{safe_title(task['title'])}_{name}{path.suffix}") if path.is_file() else None
+    if name == "cover" and not task.get("cover_ready"):
+        return None
+    filename = {"clip": "clip.mp4", "thumbnail": "thumbnail.jpg", "cover": "cover.jpg"}[name]
+    path = _directory(task_id) / filename
+    if not path.is_file():
+        return None
+    # Tên file tải về = đúng tiêu đề video (giữ dấu |), không thêm hậu tố
+    # _clip/_cover; riêng thumbnail giữ hậu tố để khỏi trùng tên cover.
+    base = download_title(task["title"])
+    suffix = "" if name in ("clip", "cover") else "_thumbnail"
+    return path, f"{base}{suffix}{path.suffix}"
 
 
 def _remove_task(task_id: str) -> None:
@@ -508,6 +519,25 @@ def _run(task_id: str, config: dict, resume: bool = False) -> None:
                     source.unlink(missing_ok=True)
                 except OSError:
                     pass
+            if body.add_intro_outro:
+                # Sau khi cắt: chuẩn hoá cover 1088×1446 (ưu tiên ảnh ChatGPT
+                # đã gen cho video), chèn vào đầu (giữ tỉ lệ + căn giữa) và
+                # thêm outro template YT ở cuối. Không có cover AI thì dùng
+                # thumbnail gốc upscale để không kẹt hàng đợi.
+                _update(task_id, status="cutting", progress=58,
+                        message="Đang chuẩn hoá cover 1088×1446 + ghép intro/outro…")
+                meta = assemble_intro_outro(
+                    output, directory, video_id=body.video_id, temp_dir=settings.temp_dir,
+                    channel=info.get("channel_title", ""), title=title,
+                    thumbnail=directory / "thumbnail.jpg",
+                    intro_seconds=body.intro_seconds, outro_seconds=body.outro_seconds,
+                    cancel=cancel,
+                    on_step=lambda message: _update(task_id, message=message),
+                )
+                extra = (f" + intro cover {meta['intro_seconds']:g}s & outro YT {meta['outro_seconds']:g}s"
+                         f" ({'ảnh bìa ChatGPT' if meta['cover_ai'] else 'cover từ thumbnail gốc'}).")
+                cut = {**cut, "reason": cut.get("reason", "") + extra}
+                _update(task_id, cut=cut, intro_outro=meta)
             _update(task_id, clip_ready=True, status="uploading", progress=75, message="Đang upload video đã cắt lên Facebook…")
             facebook.upload(output, title, caption, lambda **fields: _update(task_id, **fields))
             _complete_publish(task_id, facebook, cancel=cancel)

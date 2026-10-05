@@ -22,8 +22,8 @@ function makePrompt(title: string, part: number): string {
   return [
     "@Tạo hình ảnh",
     "Hãy tạo hình giống ảnh tham chiếu đính kèm để làm thumbnail cho video YouTube.",
-    `Dùng tiêu đề tiếng Việt: \"${title}\".`,
-    "Giữ font đơn giản, rõ ràng, dễ đọc; chữ phải nổi bật khi xem ở kích thước nhỏ.",
+    `Dịch tiêu đề sang tiếng Việt: \"${title}\".`,
+    "Giữ font đơn giản giống với font gốc, rõ ràng, dễ đọc; chữ phải nổi bật khi xem ở kích thước nhỏ.",
     "Chỉnh bố cục và kích thước đúng tỷ lệ thumbnail YouTube 16:9 (1280x720).",
     "Dùng tông màu hài hòa, trung tính, bớt chói.",
     `Bổ sung chữ \"Phần ${part}\" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải.`,

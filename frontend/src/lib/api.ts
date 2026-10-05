@@ -104,6 +104,9 @@ export async function deleteYoutubeCookies(): Promise<void> {
   await api.delete("/youtube/cookies");
 }
 
+export const COVER_PROMPT_DEFAULT =
+  "Làm rõ nét hình ảnh, giữ lại thông tin Phần ở góc trên phải, chỉnh tỉ lệ hình thành 1088 × 1446";
+
 export interface FacebookFlowInput {
   video_id: string;
   title: string;
@@ -116,6 +119,10 @@ export interface FacebookFlowInput {
   cookies_from_browser: CookieBrowser;
   full_video?: boolean;
   comment_blocked?: boolean;
+  add_intro_outro?: boolean;
+  intro_seconds?: number;
+  outro_seconds?: number;
+  cover_prompt?: string;
 }
 
 export interface FacebookFlowTask {
@@ -136,6 +143,13 @@ export interface FacebookFlowTask {
   clip_ready: boolean;
   thumbnail_ready?: boolean;
   thumbnail_set?: boolean;
+  cover_ready?: boolean;
+  intro_outro?: {
+    intro_seconds: number;
+    outro_seconds: number;
+    duration: number;
+    cover_ai: boolean;
+  } | null;
   comment_posted?: boolean;
   comment_error?: string;
   can_resume: boolean;
@@ -356,6 +370,7 @@ export interface SavedVideoSummary {
   thumbnail_local: string;
   has_ai: boolean;
   has_generated_thumbnail: boolean;
+  has_cover?: boolean;
   saved_at: number;
 }
 
@@ -365,6 +380,7 @@ export interface SavedVideoDetail {
   saved_at: number;
   thumbnail_local: string;
   generated_thumbnail: string;
+  cover?: string;
 }
 
 export async function listSavedVideos(): Promise<SavedVideoSummary[]> {
@@ -417,11 +433,16 @@ export async function generateChatGptThumbnail(body: {
 export async function saveGeneratedThumbnail(
   videoId: string,
   image: Blob,
+  slot?: "cover",
 ): Promise<{ status: string; url: string }> {
   const form = new FormData();
-  form.append("file", image, "thumbnail.png");
-  const res = await api.post(`/analyzed/${videoId}/generated-thumbnail`, form);
+  form.append("file", image, slot === "cover" ? "cover.png" : "thumbnail.png");
+  const res = await api.post(`/analyzed/${videoId}/generated-thumbnail${slot === "cover" ? "?slot=cover" : ""}`, form);
   return res.data;
+}
+
+export function coverUrl(videoId: string): string {
+  return `/api/analyzed/${videoId}/cover`;
 }
 
 export function generatedThumbnailUrl(videoId: string): string {

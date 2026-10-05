@@ -18,10 +18,17 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.models import FacebookFlowIn
-from app.routers import config_router, facebook
+from app.routers import analyze, config_router, facebook
 from app.services import downloader, facebook_flow, store
 from app.services.cancellation import Cancellation, CancelledError
 from app.services.facebook_client import FacebookClient, build_blocked_comment, build_caption
+from app.services.fb_assembly import (
+    COVER_H,
+    COVER_W,
+    assemble_intro_outro,
+    ensure_cover,
+    make_outro_image,
+)
 from app.services.quiet_cut import cut_video, find_cut, probe_video, quiet_intervals, run_media
 
 
@@ -50,6 +57,68 @@ class QuietCutTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Không tìm được khoảng lặng"):
                 find_cut(source, 1, 0.4, -35, 0.3)
             self.assertAlmostEqual(find_cut(source, 30, 1, -35, 0.5)["seconds"], 6, delta=0.1)
+
+
+class FbAssemblyTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
+    def test_cover_intro_outro_roundtrip(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=teal:s=1280x720:r=30:d=10",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                str(directory / "clip.mp4"),
+            ], check=True, capture_output=True, timeout=60)
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=1280x720:d=1",
+                "-frames:v", "1", str(directory / "thumbnail.jpg"),
+            ], check=True, capture_output=True, timeout=30)
+            cover = ensure_cover(directory / "thumbnail.jpg", directory / "cover.jpg")
+            with Image.open(cover) as cover_img:
+                self.assertEqual(cover_img.size, (COVER_W, COVER_H))
+            outro = make_outro_image(
+                directory / "thumbnail.jpg", "Kênh Kiểm Tra Ỡ",
+                "Tên video Phần 5 có dấu ữ",
+                directory / "outro.jpg", 1280, 720,
+            )
+            with Image.open(outro) as outro_img:
+                self.assertEqual(outro_img.size, (1280, 720))
+            # Ảnh không phải nền đen trơ trụi (đã vẽ thumbnail + chữ).
+            self.assertGreater(len(set(outro.read_bytes())), 100)
+            steps = []
+            meta = assemble_intro_outro(
+                directory / "clip.mp4", directory, video_id="dQw4w9WgXcQ",
+                temp_dir=directory, channel="Kênh", title="Tên video",
+                thumbnail=directory / "thumbnail.jpg",
+                intro_seconds=1.0, outro_seconds=5.0,
+                on_step=steps.append,
+            )
+            self.assertFalse(meta["cover_ai"])
+            self.assertTrue(steps)
+            self.assertAlmostEqual(meta["duration"], 16.0, delta=0.5)
+            self.assertAlmostEqual(probe_video(directory / "clip.mp4")["duration"], 16.0, delta=0.5)
+            # Có ảnh bìa AI trong analyzed/ → worker dùng thay vì thumbnail upscale.
+            analyzed = directory / "analyzed"
+            analyzed.mkdir()
+            shutil.copy(directory / "thumbnail.jpg", analyzed / "dQw4w9WgXcQ.cover.png")
+            meta_ai = assemble_intro_outro(
+                directory / "clip.mp4", directory, video_id="dQw4w9WgXcQ",
+                temp_dir=directory, channel="Kênh", title="Tên video",
+                thumbnail=directory / "thumbnail.jpg",
+                intro_seconds=1.0, outro_seconds=2.0,
+            )
+            self.assertTrue(meta_ai["cover_ai"])
+            self.assertAlmostEqual(meta_ai["duration"], 16.0 + 3.0, delta=0.6)
+
+    def test_ensure_cover_rejects_missing_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "Không tìm thấy ảnh nguồn"):
+                ensure_cover(Path(temp) / "missing.jpg", Path(temp) / "cover.jpg")
 
 
 class FacebookClientTests(unittest.TestCase):
@@ -644,6 +713,61 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["skipped"], [])
         self.assertEqual(result["tasks"][0]["status"], "queued")
+
+    def test_intro_outro_options_default_on_and_cover_artifact(self):
+        body = FacebookFlowIn(video_id="dQw4w9WgXcQ")
+        self.assertTrue(body.add_intro_outro)
+        self.assertEqual(body.intro_seconds, 1.0)
+        self.assertEqual(body.outro_seconds, 5.0)
+        self.assertIn("1088", body.cover_prompt)
+        task_id = self._task()
+        self.assertFalse(facebook_flow.get_task(task_id)["cover_ready"])
+        self.assertIsNone(facebook_flow.artifact(task_id, "cover"))
+        (settings.temp_dir / "facebook_flows" / task_id / "cover.jpg").write_bytes(b"fake-cover")
+        self.assertTrue(facebook_flow.get_task(task_id)["cover_ready"])
+        app = FastAPI()
+        app.include_router(facebook.router)
+        client = TestClient(app)
+        response = client.get(f"/facebook/flows/{task_id}/cover")
+        self.assertEqual(response.status_code, 200)
+
+    def test_download_names_keep_pipe_and_drop_suffix(self):
+        from app.services.downloader import download_title
+
+        self.assertEqual(download_title("A | B Phần 5"), "A ｜ B Phần 5")
+        self.assertEqual(download_title('a/b\\c:d*e?f"g<h>i'), "a b c d e f g h i")
+        self.assertEqual(download_title("x\r\ny"), "x y")
+        task_id = self._task()
+        facebook_flow._update(task_id, title="Tóm Tắt | Phim Hay Phần 5", clip_ready=True)
+        directory = settings.temp_dir / "facebook_flows" / task_id
+        (directory / "clip.mp4").write_bytes(b"fake-clip")
+        (directory / "cover.jpg").write_bytes(b"fake-cover")
+        (directory / "thumbnail.jpg").write_bytes(b"fake-thumb")
+        _, clip_name = facebook_flow.artifact(task_id, "clip")
+        _, cover_name = facebook_flow.artifact(task_id, "cover")
+        _, thumb_name = facebook_flow.artifact(task_id, "thumbnail")
+        self.assertEqual(clip_name, "Tóm Tắt ｜ Phim Hay Phần 5.mp4")
+        self.assertEqual(cover_name, "Tóm Tắt ｜ Phim Hay Phần 5.jpg")
+        self.assertEqual(thumb_name, "Tóm Tắt ｜ Phim Hay Phần 5_thumbnail.jpg")
+
+    def test_cover_slot_is_separate_from_generated_thumbnail(self):
+        from app.routers import analyze as analyze_router
+
+        app = FastAPI()
+        app.include_router(analyze_router.router)
+        client = TestClient(app)
+        video_id = "dQw4w9WgXcQ"
+        for slot, name in (("", f"{video_id}.generated.png"), ("cover", f"{video_id}.cover.png")):
+            response = client.post(
+                f"/analyzed/{video_id}/generated-thumbnail" + (f"?slot={slot}" if slot else ""),
+                files={"file": ("img.png", b"\x89PNG" + b"0" * 2000, "image/png")},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue((settings.temp_dir / "analyzed" / name).is_file())
+        self.assertEqual(client.get(f"/analyzed/{video_id}/cover").status_code, 200)
+        self.assertEqual(
+            client.get("/analyzed/unknownvideoid123/cover").status_code, 404,
+        )
 
 
 if __name__ == "__main__":

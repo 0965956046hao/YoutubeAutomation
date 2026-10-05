@@ -96,13 +96,16 @@ def recent_videos(
     api_key: str,
     channel_ids: list[str],
     days: int = 2,
-    per_channel: int = 25,
+    per_channel: int | None = None,
 ) -> list[dict]:
     """List video công khai đã đăng trong `days` ngày gần nhất từ các kênh theo dõi.
 
     Dùng uploads playlist (quota rẻ ~1-3 unit) thay vì search.list (~100 unit),
     rồi lọc theo videoPublishedAt. Sau đó gọi videos.list để lấy full
     snippet + contentDetails + statistics (mô tả, duration, view/like).
+
+    Độ sâu quét tăng theo `days` (kênh đăng nhiều cần nhiều trang mới phủ hết
+    khung ngày), dừng sớm khi gặp video cũ hơn cutoff vì playlist xếp mới-nhất-trước.
     """
     if not access_token and not api_key:
         raise RuntimeError("Chưa cấu hình: cần login Google (OAuth) hoặc nhập YouTube API key.")
@@ -110,6 +113,8 @@ def recent_videos(
         raise RuntimeError("Chưa có kênh theo dõi nào. Thêm channel ID/handle ở trang Cấu hình.")
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    # Quét đủ sâu để phủ hết `days` ngày (tối đa 500 video/kênh, 50 video/trang).
+    scan_limit = per_channel or max(50, min(500, days * 50))
     headers, key_param = _headers(access_token, api_key)
     found: list[dict] = []
 
@@ -128,11 +133,11 @@ def recent_videos(
             page_token: str | None = None
             scanned = 0
             candidate_ids: list[str] = []
-            while scanned < per_channel:
+            while scanned < scan_limit:
                 params = {
                     "part": "contentDetails",
                     "playlistId": playlist,
-                    "maxResults": min(50, per_channel - scanned),
+                    "maxResults": min(50, scan_limit - scanned),
                 }
                 if page_token:
                     params["pageToken"] = page_token
@@ -141,6 +146,7 @@ def recent_videos(
                     break
                 payload = r.json()
                 for it in payload.get("items", []):
+                    scanned += 1
                     cd = it.get("contentDetails", {})
                     vid = cd.get("videoId", "")
                     published = cd.get("videoPublishedAt", "")
@@ -150,8 +156,7 @@ def recent_videos(
                         continue
                     if dt >= cutoff and vid:
                         candidate_ids.append(vid)
-                    scanned += 1
-                    if scanned >= per_channel:
+                    if scanned >= scan_limit:
                         break
                 page_token = payload.get("nextPageToken")
                 if not page_token:

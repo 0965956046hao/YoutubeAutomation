@@ -113,6 +113,15 @@ class FacebookFlowIn(BaseModel):
     cookies_from_browser: Literal["", "chrome", "firefox", "safari", "edge", "brave"] = ""
     full_video: bool = False
     comment_blocked: bool = False
+    # Intro cover + outro YT: ghép sau khi cắt xong.
+    add_intro_outro: bool = True
+    intro_seconds: float = Field(default=1.0, ge=0.5, le=10)
+    outro_seconds: float = Field(default=5.0, ge=2, le=15)
+    cover_prompt: str = Field(
+        default="Làm rõ nét hình ảnh, giữ lại thông tin Phần ở góc trên phải, "
+        "chỉnh tỉ lệ hình thành 1088 × 1446",
+        max_length=2000,
+    )
 
 
 class FacebookFlowBatchIn(BaseModel):

@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AppConfig, CookieBrowser, FacebookFlowTask, VideoItem,
-  analyzeLink, cancelFacebookFlow, createFacebookFlow, createFacebookFlows, deleteFacebookFlow, formatDate, getConfig, getRecent, getVideoDetail,
-  listFacebookFlows, lowThumbnailUrl, resumeFacebookFlow, setFacebookFlowThumbnail, thumbnailUrl,
+  AppConfig, CookieBrowser, COVER_PROMPT_DEFAULT, FacebookFlowTask, VideoItem,
+  analyzeLink, cancelFacebookFlow, coverUrl, createFacebookFlow, createFacebookFlows, deleteFacebookFlow, formatDate, generateChatGptThumbnail, getConfig, getRecent, getSavedVideo, getVideoDetail,
+  listFacebookFlows, lowThumbnailUrl, resumeFacebookFlow, saveAnalyzedVideo, saveGeneratedThumbnail, setFacebookFlowThumbnail, thumbnailUrl,
 } from "@/lib/api";
 import YoutubeCookies from "@/components/YoutubeCookies";
 
@@ -87,6 +87,14 @@ export default function FacebookFlow({
   const [noiseDb, setNoiseDb] = useState(-35);
   const [silenceDuration, setSilenceDuration] = useState(0.5);
   const [browser, setBrowser] = useState<CookieBrowser>("");
+  const [addIntroOutro, setAddIntroOutro] = useState(true);
+  const [introSeconds, setIntroSeconds] = useState(1);
+  const [outroSeconds, setOutroSeconds] = useState(5);
+  const [coverPrompt, setCoverPrompt] = useState(COVER_PROMPT_DEFAULT);
+  const [coverReady, setCoverReady] = useState<boolean | null>(null);
+  const [gptBusy, setGptBusy] = useState(false);
+  const [gptMsg, setGptMsg] = useState("");
+  const [coverBuster, setCoverBuster] = useState(0);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tasks, setTasks] = useState<FacebookFlowTask[]>([]);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -106,6 +114,8 @@ export default function FacebookFlow({
     setSource(null);
     setError("");
     setNotice("");
+    setGptMsg("");
+    setCoverReady(null);
     try {
       const info = isLink ? await analyzeLink(input) : await getVideoDetail(input);
       if (current !== requestId.current) return;
@@ -116,6 +126,10 @@ export default function FacebookFlow({
       setTags((info.tags || []).join(", "));
       setUrl(info.url);
       if ("warning" in info && info.warning) setNotice(String(info.warning));
+      getSavedVideo(info.video_id).then(
+        (saved) => { if (current === requestId.current) setCoverReady(Boolean(saved.cover)); },
+        () => { if (current === requestId.current) setCoverReady(false); },
+      );
     } catch (e) {
       if (current === requestId.current) {
         setSelectedVideoId("");
@@ -179,6 +193,36 @@ export default function FacebookFlow({
     });
   }
 
+  async function handleGenerateCover() {
+    if (!source || gptBusy) return;
+    setGptBusy(true);
+    setGptMsg("Đang lưu ảnh gốc và chờ ChatGPT tạo cover 1088×1446 (có thể mất 2–5 phút)…");
+    try {
+      await saveAnalyzedVideo(
+        { ...source, tags: source.tags || [], hashtags: [], warning: "" },
+        null,
+      );
+      const result = await generateChatGptThumbnail({
+        video_id: source.video_id,
+        title: (title || source.title).trim(),
+        part: 1,
+        prompt: coverPrompt.trim() || COVER_PROMPT_DEFAULT,
+      });
+      if (result.status === "need_login") {
+        setGptMsg(result.detail);
+        return;
+      }
+      await saveGeneratedThumbnail(source.video_id, result.image, "cover");
+      setCoverReady(true);
+      setCoverBuster(Date.now());
+      setGptMsg("Đã lưu ảnh bìa ChatGPT. Flow sẽ tự dùng ảnh này ở intro; nếu chưa kịp gen, flow dùng thumbnail gốc upscale.");
+    } catch (e) {
+      setGptMsg(e instanceof Error ? e.message : "Tạo cover thất bại.");
+    } finally {
+      setGptBusy(false);
+    }
+  }
+
   async function queueSelected() {
     const selected = videos.filter((v) => checked.has(v.video_id));
     if (selected.length === 0) return;
@@ -192,6 +236,8 @@ export default function FacebookFlow({
         tags: v.tags || [],
         target_minutes: minutes, search_window: windowSeconds, silence_db: noiseDb,
         silence_duration: silenceDuration, cookies_from_browser: browser,
+        add_intro_outro: addIntroOutro, intro_seconds: introSeconds,
+        outro_seconds: outroSeconds, cover_prompt: coverPrompt.trim() || COVER_PROMPT_DEFAULT,
       })));
       setTasks(await listFacebookFlows());
       const skipped = result.skipped.map((s) => `${s.video_id}: ${s.reason}`).join("\n");
@@ -217,9 +263,14 @@ export default function FacebookFlow({
         tags: tagList,
         target_minutes: minutes, search_window: windowSeconds, silence_db: noiseDb,
         silence_duration: silenceDuration, cookies_from_browser: browser,
+        add_intro_outro: addIntroOutro, intro_seconds: introSeconds,
+        outro_seconds: outroSeconds, cover_prompt: coverPrompt.trim() || COVER_PROMPT_DEFAULT,
       });
       setTasks((previous) => [task, ...previous.filter((item) => item.task_id !== task.task_id)]);
-      setNotice("Flow đã chạy nền. Bạn có thể chuyển tab; tiến độ và kết quả lưu tại đây.");
+      setNotice("Flow đã chạy nền. Bạn có thể chuyển tab; tiến độ và kết quả lưu tại đây." +
+        (addIntroOutro && coverReady !== true
+          ? " Chưa có cover AI — vẫn kịp bấm “Gen cover bằng ChatGPT” ngay bây giờ, nếu xong trước bước ghép thì flow sẽ dùng ảnh AI."
+          : ""));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không tạo được flow.");
     } finally {
@@ -316,7 +367,7 @@ export default function FacebookFlow({
           <span className="eyebrow">YouTube → khoảng lặng → Facebook Page</span>
           <h2 className="mt-2 text-xl font-semibold">Cắt phần đầu và đăng Facebook</h2>
           <p className="mt-2 max-w-4xl text-[13px] leading-relaxed text-ink-muted">
-            Tải video → tìm khoảng lặng gần {minutes} phút → cắt MP4 → đăng cùng mô tả, thumbnail gốc và hashtag.
+            Tải video → tìm khoảng lặng gần {minutes} phút → cắt MP4 → chuẩn hoá cover 1088×1446 → chèn cover vào đầu video (giữ tỉ lệ, căn giữa) → thêm outro template YouTube ở cuối → đăng cùng mô tả và hashtag.
             Video ngắn hơn mốc cắt được giữ toàn bộ. Tìm khoảng lặng giúp giảm cắt ngang câu, không đảm bảo hiểu ngữ nghĩa lời nói.
           </p>
           <p className="mt-2 text-[12px] text-ink-light">
@@ -403,12 +454,64 @@ export default function FacebookFlow({
                 </label>
               </div>
               <YoutubeCookies />
+              <div className="rounded-lg bg-white/[0.03] p-4 ring-1 ring-white/10">
+                <label className="flex cursor-pointer items-center gap-2 text-[13px] font-semibold">
+                  <input type="checkbox" className="h-4 w-4 accent-[#4d93ff]"
+                    checked={addIntroOutro} onChange={(e) => setAddIntroOutro(e.target.checked)} />
+                  Chèn cover vào đầu + outro YouTube ở cuối video
+                </label>
+                {addIntroOutro && (
+                  <div className="mt-3 space-y-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] text-ink-muted">Cover hiện ở đầu (giây)</span>
+                        <input className="input-field" type="number" min={0.5} max={10} step={0.5}
+                          value={introSeconds} onChange={(e) => setIntroSeconds(Number(e.target.value))} />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] text-ink-muted">Outro template YT ở cuối (giây)</span>
+                        <input className="input-field" type="number" min={2} max={15} step={1}
+                          value={outroSeconds} onChange={(e) => setOutroSeconds(Number(e.target.value))} />
+                      </label>
+                    </div>
+                    <label className="block">
+                      <span className="mb-1.5 block text-[12px] text-ink-muted">Prompt gen cover từ thumbnail (ChatGPT)</span>
+                      <textarea className="textarea-field !font-sans !text-[13px]" rows={2}
+                        value={coverPrompt} onChange={(e) => setCoverPrompt(e.target.value)} />
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button type="button" className="btn-island-secondary btn-sm"
+                        disabled={gptBusy || !source} onClick={() => void handleGenerateCover()}>
+                        {gptBusy ? "ChatGPT đang tạo cover…" : "Gen cover bằng ChatGPT (1088×1446)"}
+                      </button>
+                      {coverReady === true && <span className="tag !text-emerald-300">Đã có ảnh bìa AI</span>}
+                      {coverReady === false && <span className="tag">Chưa có ảnh bìa AI</span>}
+                    </div>
+                    {coverReady === true && source && (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img src={`${coverUrl(source.video_id)}?v=${coverBuster}`} alt="Ảnh bìa ChatGPT 1088×1446"
+                        className="w-40 rounded-lg object-cover ring-1 ring-white/20" loading="lazy" />
+                    )}
+                    {gptMsg && <p className="text-[12px] text-accent-light" role="status">{gptMsg}</p>}
+                    <p className="text-[11px] text-ink-light">
+                      Cover giữ tỉ lệ gốc và căn giữa video. Outro tự render tên kênh + thumbnail + tên video YouTube (không dán link) để người xem tìm tới bản gốc.
+                      Nếu chưa kịp gen cover khi flow chạy, hệ thống tự upscale thumbnail gốc để không kẹt hàng đợi.
+                    </p>
+                  </div>
+                )}
+              </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button className="btn-island-primary btn-sm" disabled={starting || loading || !configured || activeForSource}>
                   {starting ? "Đang tạo flow…" : activeForSource ? "Video này đang có flow chạy" : "Tải → Cắt → Đăng Facebook"}
                 </button>
                 {configured && <span className="text-[12px] text-ink-light">Page đích: {config?.facebook_page_id}</span>}
               </div>
+              {addIntroOutro && coverReady !== true && (
+                <p className="mt-2 text-[12px] text-amber-200" role="status">
+                  Worker không tự mở ChatGPT — muốn intro dùng ảnh AI thì bấm “Gen cover bằng ChatGPT (1088×1446)” ở trên trước khi flow chạy tới bước ghép.
+                  Bỏ qua bước này thì flow dùng thumbnail gốc upscale.
+                </p>
+              )}
             </form>
           )}
           {notice && <p className="mt-4 text-[12px] text-accent-light" role="status">{notice}</p>}
@@ -437,6 +540,11 @@ export default function FacebookFlow({
             <FlowProgress task={task} />
             <p className="mt-2 text-[12px] text-ink-muted">{task.message}</p>
             {task.cut && <p className="mt-2 text-[12px] text-ink-muted">Điểm cắt: <b className="text-ink">{clock(task.cut.seconds)}</b> / {clock(task.cut.source_duration)} · {task.cut.reason}</p>}
+            {task.intro_outro && (
+              <p className="mt-1 text-[12px] text-ink-muted">
+                Intro cover {task.intro_outro.intro_seconds} giây + outro YT {task.intro_outro.outro_seconds} giây · cover: {task.intro_outro.cover_ai ? "ảnh bìa ChatGPT" : "thumbnail gốc upscale"}.
+              </p>
+            )}
             {task.error && <p className="mt-2 whitespace-pre-wrap break-words text-[12px] text-red-300">{task.error}</p>}
             {task.comment_posted && <p className="mt-2 text-[12px] text-emerald-300">Đã đăng comment link Facebook lên video YouTube — vào Studio ghim tay.</p>}
             {task.comment_error && <p className="mt-2 whitespace-pre-wrap break-words text-[12px] text-red-300">{task.comment_error} Đăng tay trong Studio.</p>}
@@ -445,6 +553,7 @@ export default function FacebookFlow({
               {task.status === "error" && !task.thumbnail_set && task.thumbnail_ready && task.facebook_video_id && <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "thumbnail")} title="Đặt thumbnail YouTube làm ảnh bìa video Facebook">Đặt ảnh bìa YT</button>}
               {task.can_resume && <button className="btn-island-primary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "resume")}>Tiếp tục video đã upload</button>}
               {task.clip_ready && <a className="btn-island-secondary btn-xs" href={`/api/facebook/flows/${task.task_id}/clip`} download>Tải video đã cắt</a>}
+              {task.cover_ready && <a className="btn-island-secondary btn-xs" href={`/api/facebook/flows/${task.task_id}/cover`} download>Tải cover 1088×1446</a>}
               {isActive(task) && <button className="btn-island-danger btn-xs" disabled={Boolean(pendingTask) || task.status === "cancelling"}
                 onClick={() => taskAction(task.task_id, "cancel")}>{task.status === "cancelling" ? "Đang hủy…" : "Hủy"}</button>}
               <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask) || task.delete_requested}

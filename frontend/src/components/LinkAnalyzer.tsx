@@ -95,7 +95,7 @@ export default function LinkAnalyzer() {
   }
 
   function buildGptPrompt(title = thumbTitle, part = partNum): string {
-    return `@Tạo hình ảnh Hãy tạo hình giống ảnh tham chiếu đính kèm để làm thumbnail cho video YouTube. Dùng tiêu đề tiếng Việt: "${title}". Giữ font đơn giản, rõ ràng, dễ đọc, chữ nổi bật khi xem nhỏ. Chỉnh kích thước đúng thumbnail YouTube 16:9 (1280x720), dùng tông màu hài hòa trung tính, bớt chói. Bổ sung chữ "Phần ${part}" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải. Xóa toàn bộ chữ và logo gốc ở góc trên bên trái và góc trên bên phải trước khi đặt chữ mới. Giữ nguyên nhân vật chính, bối cảnh và phong cách; không thêm logo hoặc watermark mới. Chỉ tạo 1 ảnh hoàn chỉnh, không giải thích.`;
+    return `@Tạo hình ảnh Hãy tạo hình giống ảnh tham chiếu đính kèm để làm thumbnail cho video YouTube. Dịch tiêu đề sang tiếng Việt: "${title}". Giữ font đơn giản giống với font gốc, rõ ràng, dễ đọc, chữ nổi bật khi xem nhỏ. Chỉnh kích thước đúng thumbnail YouTube 16:9 (1280x720), dùng tông màu hài hòa trung tính, bớt chói. Bổ sung chữ "Phần ${part}" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải. Xóa toàn bộ chữ và logo gốc ở góc trên bên trái và góc trên bên phải trước khi đặt chữ mới. Giữ nguyên nhân vật chính, bối cảnh và phong cách; không thêm logo hoặc watermark mới. Chỉ tạo 1 ảnh hoàn chỉnh, không giải thích.`;
   }
 
   function applyThumbnailTitle(title: string) {
