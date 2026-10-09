@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig, CookieBrowser, COVER_PROMPT_DEFAULT, FacebookFlowTask, VideoItem,
   analyzeLink, cancelFacebookFlow, coverUrl, createFacebookFlow, createFacebookFlows, deleteFacebookFlow, formatDate, generateChatGptThumbnail, getConfig, getRecent, getSavedVideo, getVideoDetail,
-  listFacebookFlows, lowThumbnailUrl, resumeFacebookFlow, saveAnalyzedVideo, saveGeneratedThumbnail, setFacebookFlowThumbnail, thumbnailUrl,
+  listFacebookFlows, lowThumbnailUrl, resumeFacebookFlow, retryFacebookFlow, saveAnalyzedVideo, saveGeneratedThumbnail, setFacebookFlowThumbnail, thumbnailUrl,
 } from "@/lib/api";
 import YoutubeCookies from "@/components/YoutubeCookies";
 
@@ -88,8 +88,8 @@ export default function FacebookFlow({
   const [silenceDuration, setSilenceDuration] = useState(0.5);
   const [browser, setBrowser] = useState<CookieBrowser>("");
   const [addIntroOutro, setAddIntroOutro] = useState(true);
-  const [introSeconds, setIntroSeconds] = useState(1);
-  const [outroSeconds, setOutroSeconds] = useState(5);
+  const [introSeconds, setIntroSeconds] = useState(0.1);
+  const [outroSeconds, setOutroSeconds] = useState(10);
   const [coverPrompt, setCoverPrompt] = useState(COVER_PROMPT_DEFAULT);
   const [coverReady, setCoverReady] = useState<boolean | null>(null);
   const [gptBusy, setGptBusy] = useState(false);
@@ -201,6 +201,7 @@ export default function FacebookFlow({
       await saveAnalyzedVideo(
         { ...source, tags: source.tags || [], hashtags: [], warning: "" },
         null,
+        "facebook-flow",
       );
       const result = await generateChatGptThumbnail({
         video_id: source.video_id,
@@ -278,12 +279,16 @@ export default function FacebookFlow({
     }
   }
 
-  async function taskAction(taskId: string, action: "resume" | "delete" | "thumbnail" | "cancel") {
+  async function taskAction(taskId: string, action: "resume" | "retry" | "delete" | "thumbnail" | "cancel") {
     setPendingTask(taskId);
     setError("");
     setNotice("");
     try {
       if (action === "resume") await resumeFacebookFlow(taskId);
+      else if (action === "retry") {
+        await retryFacebookFlow(taskId);
+        setNotice("Đã cho flow chạy lại từ đầu (tải/cắt/ghép/upload lại toàn bộ).");
+      }
       else if (action === "cancel") await cancelFacebookFlow(taskId);
       else if (action === "thumbnail") {
         await setFacebookFlowThumbnail(taskId);
@@ -464,13 +469,13 @@ export default function FacebookFlow({
                   <div className="mt-3 space-y-3">
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className="block">
-                        <span className="mb-1.5 block text-[12px] text-ink-muted">Cover hiện ở đầu (giây)</span>
-                        <input className="input-field" type="number" min={0.5} max={10} step={0.5}
+                        <span className="mb-1.5 block text-[12px] text-ink-muted">Cover hiện ở đầu (giây, số lẻ được)</span>
+                        <input className="input-field" type="number" min={0.1} max={10} step={0.1}
                           value={introSeconds} onChange={(e) => setIntroSeconds(Number(e.target.value))} />
                       </label>
                       <label className="block">
-                        <span className="mb-1.5 block text-[12px] text-ink-muted">Outro template YT ở cuối (giây)</span>
-                        <input className="input-field" type="number" min={2} max={15} step={1}
+                        <span className="mb-1.5 block text-[12px] text-ink-muted">Outro template YT ở cuối (giây, số lẻ được)</span>
+                        <input className="input-field" type="number" min={2} max={15} step={0.1}
                           value={outroSeconds} onChange={(e) => setOutroSeconds(Number(e.target.value))} />
                       </label>
                     </div>
@@ -552,6 +557,7 @@ export default function FacebookFlow({
               {task.facebook_url && <a className="btn-island-secondary btn-xs" href={task.facebook_url} target="_blank" rel="noreferrer">Kiểm tra video Facebook ↗</a>}
               {task.status === "error" && !task.thumbnail_set && task.thumbnail_ready && task.facebook_video_id && <button className="btn-island-secondary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "thumbnail")} title="Đặt thumbnail YouTube làm ảnh bìa video Facebook">Đặt ảnh bìa YT</button>}
               {task.can_resume && <button className="btn-island-primary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "resume")}>Tiếp tục video đã upload</button>}
+              {task.status === "error" && !task.can_resume && <button className="btn-island-primary btn-xs" disabled={Boolean(pendingTask)} onClick={() => taskAction(task.task_id, "retry")} title="Tải/cắt/ghép/upload lại toàn bộ từ đầu">Chạy lại từ đầu</button>}
               {task.clip_ready && <a className="btn-island-secondary btn-xs" href={`/api/facebook/flows/${task.task_id}/clip`} download>Tải video đã cắt</a>}
               {task.cover_ready && <a className="btn-island-secondary btn-xs" href={`/api/facebook/flows/${task.task_id}/cover`} download>Tải cover 1088×1446</a>}
               {isActive(task) && <button className="btn-island-danger btn-xs" disabled={Boolean(pendingTask) || task.status === "cancelling"}

@@ -212,7 +212,7 @@ def assemble_intro_outro(
 
     if cancel:
         cancel.check()
-    intro_seconds = min(10.0, max(0.5, float(intro_seconds or 1.0)))
+    intro_seconds = min(10.0, max(0.1, float(intro_seconds or 0.1)))
     outro_seconds = min(15.0, max(2.0, float(outro_seconds or 5.0)))
 
     say("Đang chuẩn hoá ảnh bìa 1088×1446…")

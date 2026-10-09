@@ -95,13 +95,13 @@ class FbAssemblyTests(unittest.TestCase):
                 directory / "clip.mp4", directory, video_id="dQw4w9WgXcQ",
                 temp_dir=directory, channel="Kênh", title="Tên video",
                 thumbnail=directory / "thumbnail.jpg",
-                intro_seconds=1.0, outro_seconds=5.0,
+                intro_seconds=0.1, outro_seconds=5.0,
                 on_step=steps.append,
             )
             self.assertFalse(meta["cover_ai"])
             self.assertTrue(steps)
-            self.assertAlmostEqual(meta["duration"], 16.0, delta=0.5)
-            self.assertAlmostEqual(probe_video(directory / "clip.mp4")["duration"], 16.0, delta=0.5)
+            self.assertAlmostEqual(meta["duration"], 15.1, delta=0.5)
+            self.assertAlmostEqual(probe_video(directory / "clip.mp4")["duration"], 15.1, delta=0.5)
             # Có ảnh bìa AI trong analyzed/ → worker dùng thay vì thumbnail upscale.
             analyzed = directory / "analyzed"
             analyzed.mkdir()
@@ -113,7 +113,7 @@ class FbAssemblyTests(unittest.TestCase):
                 intro_seconds=1.0, outro_seconds=2.0,
             )
             self.assertTrue(meta_ai["cover_ai"])
-            self.assertAlmostEqual(meta_ai["duration"], 16.0 + 3.0, delta=0.6)
+            self.assertAlmostEqual(meta_ai["duration"], 15.1 + 3.0, delta=0.6)
 
     def test_ensure_cover_rejects_missing_source(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -717,8 +717,8 @@ class FlowTests(unittest.TestCase):
     def test_intro_outro_options_default_on_and_cover_artifact(self):
         body = FacebookFlowIn(video_id="dQw4w9WgXcQ")
         self.assertTrue(body.add_intro_outro)
-        self.assertEqual(body.intro_seconds, 1.0)
-        self.assertEqual(body.outro_seconds, 5.0)
+        self.assertEqual(body.intro_seconds, 0.1)
+        self.assertEqual(body.outro_seconds, 10.0)
         self.assertIn("1088", body.cover_prompt)
         task_id = self._task()
         self.assertFalse(facebook_flow.get_task(task_id)["cover_ready"])
@@ -750,6 +750,59 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(cover_name, "Tóm Tắt ｜ Phim Hay Phần 5.jpg")
         self.assertEqual(thumb_name, "Tóm Tắt ｜ Phim Hay Phần 5_thumbnail.jpg")
 
+    def test_retry_failed_task_clears_stale_state_and_requeues(self):
+        store.save_config({"facebook_page_id": "456", "facebook_page_token": "secret"})
+        task_id = self._task()
+        facebook_flow._update(
+            task_id, status="error", error="Tải video thất bại",
+            facebook_video_id="stale-id", facebook_url="https://fb/stale",
+            upload_finished=False, clip_ready=True, thumbnail_set=True,
+            cut={"seconds": 1, "source_duration": 2, "reason": "cũ"},
+        )
+        with patch.object(facebook_flow._pool, "submit", return_value=None) as submit:
+            retried = facebook_flow.retry_task(task_id)
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(retried["error"], "")
+        self.assertEqual(retried["facebook_video_id"], "")
+        self.assertEqual(retried["facebook_url"], "")
+        self.assertFalse(retried["upload_finished"])
+        self.assertIsNone(facebook_flow._tasks[task_id]["cut"])
+        submit.assert_called_once()
+        args, _ = submit.call_args
+        self.assertEqual(args[0], facebook_flow._run)
+        self.assertEqual(args[1], task_id)
+        self.assertEqual(len(args), 3)  # _run/task/config, không cờ resume → chạy lại toàn bộ
+        # Không phải lỗi → từ chối; đang chạy → từ chối; sai Page → từ chối.
+        with facebook_flow._lock:
+            facebook_flow._tasks[task_id]["status"] = "done"
+        with self.assertRaisesRegex(ValueError, "đang báo lỗi"):
+            facebook_flow.retry_task(task_id)
+        with facebook_flow._lock:
+            facebook_flow._tasks[task_id]["status"] = "error"
+            facebook_flow._running[task_id] = Cancellation()
+        with self.assertRaisesRegex(ValueError, "đang dừng"):
+            facebook_flow.retry_task(task_id)
+        with facebook_flow._lock:
+            del facebook_flow._running[task_id]
+        store.save_config({"facebook_page_id": "999", "facebook_page_token": "secret"})
+        with self.assertRaisesRegex(ValueError, "đúng Page"):
+            facebook_flow.retry_task(task_id)
+        with self.assertRaises(KeyError):
+            facebook_flow.retry_task("000000000000")
+
+    def test_retry_endpoint_returns_202_or_404(self):
+        store.save_config({"facebook_page_id": "456", "facebook_page_token": "secret"})
+        task_id = self._task()
+        facebook_flow._update(task_id, status="error", error="boom", upload_finished=False)
+        app = FastAPI()
+        app.include_router(facebook.router)
+        client = TestClient(app)
+        with patch.object(facebook_flow._pool, "submit", return_value=None):
+            response = client.post(f"/facebook/flows/{task_id}/retry")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "queued")
+        self.assertEqual(client.post("/facebook/flows/000000000000/retry").status_code, 404)
+
     def test_cover_slot_is_separate_from_generated_thumbnail(self):
         from app.routers import analyze as analyze_router
 
@@ -768,6 +821,85 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(
             client.get("/analyzed/unknownvideoid123/cover").status_code, 404,
         )
+
+
+class AnalyzeOriginTests(unittest.TestCase):
+    """Entry do Facebook-flow tạo (gen cover) không được nhảy vào tab Phân tích."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        temp_path = Path(self.temp.name)
+        self.settings_patch = patch.object(settings, "temp_dir", temp_path)
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+        from app.routers import analyze as analyze_router
+
+        self.analyze_router = analyze_router
+        self.fetch_patch = patch.object(
+            analyze_router, "_fetch_thumbnail_bytes", return_value=None,
+        )
+        self.fetch_patch.start()
+        self.addCleanup(self.fetch_patch.stop)
+        app = FastAPI()
+        app.include_router(analyze_router.router)
+        self.client = TestClient(app)
+
+    def _info(self, video_id: str) -> dict:
+        return {"video_id": video_id, "title": f"Title {video_id}", "channel_title": "Ch"}
+
+    def test_facebook_origin_hidden_from_list_but_files_still_served(self):
+        self.assertEqual(
+            self.client.post("/analyzed", json={"info": self._info("dQw4w9WgXcQ"), "ai": None}).status_code, 200,
+        )
+        self.assertEqual(
+            self.client.post("/analyzed", json={
+                "info": self._info("9bZkp7q19f0"), "ai": None, "origin": "facebook-flow",
+            }).status_code, 200,
+        )
+        payload = self.client.get("/analyzed").json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["videos"][0]["video_id"], "dQw4w9WgXcQ")
+        # Chi tiết vẫn đọc được (worker + route ChatGPT cần file này).
+        self.assertEqual(self.client.get("/analyzed/9bZkp7q19f0").status_code, 200)
+        with self.assertRaises(Exception):
+            self.client.post("/analyzed", json={
+                "info": self._info("9bZkp7q19f0"), "ai": None, "origin": "nơi-khác",
+            }).raise_for_status()
+
+    def test_legacy_entries_inferred_from_sibling_files(self):
+        directory = Path(self.temp.name) / "analyzed"
+        directory.mkdir(parents=True, exist_ok=True)
+        # Bản lưu cũ: chỉ có cover.png (do FB-flow gen) → ẩn.
+        (directory / "a1b2c3d4e5f.json").write_text(json.dumps({
+            "info": self._info("a1b2c3d4e5f"), "ai": None, "saved_at": 1,
+        }), encoding="utf-8")
+        (directory / "a1b2c3d4e5f.cover.png").write_bytes(b"x" * 2000)
+        # Bản lưu cũ: có generated.png (tab Phân tích gen) → hiện.
+        (directory / "f5e4d3c2b1a.json").write_text(json.dumps({
+            "info": self._info("f5e4d3c2b1a"), "ai": None, "saved_at": 2,
+        }), encoding="utf-8")
+        (directory / "f5e4d3c2b1a.generated.png").write_bytes(b"x" * 2000)
+        # Bản lưu cũ thuần túy → hiện như trước.
+        (directory / "00112233445.json").write_text(json.dumps({
+            "info": self._info("00112233445"), "ai": None, "saved_at": 3,
+        }), encoding="utf-8")
+        ids = [v["video_id"] for v in self.client.get("/analyzed").json()["videos"]]
+        self.assertNotIn("a1b2c3d4e5f", ids)
+        self.assertIn("f5e4d3c2b1a", ids)
+        self.assertIn("00112233445", ids)
+
+    def test_delete_removes_cover_file(self):
+        directory = Path(self.temp.name) / "analyzed"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "dQw4w9WgXcQ.cover.png").write_bytes(b"x" * 2000)
+        (directory / "dQw4w9WgXcQ.generated.png").write_bytes(b"x" * 2000)
+        self.client.post("/analyzed", json={"info": self._info("dQw4w9WgXcQ"), "ai": None})
+        self.assertEqual(self.client.delete("/analyzed/dQw4w9WgXcQ").status_code, 200)
+        remaining = {p.name for p in directory.iterdir()}
+        self.assertNotIn("dQw4w9WgXcQ.json", remaining)
+        self.assertNotIn("dQw4w9WgXcQ.cover.png", remaining)
+        self.assertNotIn("dQw4w9WgXcQ.generated.png", remaining)
 
 
 if __name__ == "__main__":

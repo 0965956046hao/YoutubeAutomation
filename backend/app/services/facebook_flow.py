@@ -222,6 +222,36 @@ def resume_task(task_id: str) -> dict:
         return _public(task)
 
 
+def retry_task(task_id: str) -> dict:
+    """Chạy lại từ đầu flow đang báo lỗi (tải/cắt/ghép/upload lại toàn bộ).
+
+    Khác resume (tiếp tục video đã upload xong): retry bỏ ID Facebook cũ,
+    worker làm lại mọi bước nên không dùng bản dựng dở trước đó.
+    """
+    config = store.load_config()
+    with _lock:
+        task = _tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        if task["status"] != "error":
+            raise ValueError("Chỉ chạy lại được flow đang báo lỗi.")
+        if task_id in _running:
+            raise ValueError("Worker đang dừng, hãy chờ trước khi chạy lại.")
+        if task["page_id"] != config.get("facebook_page_id"):
+            raise ValueError("Hãy cấu hình lại đúng Page của flow này trước khi chạy lại.")
+        task.update(
+            status="queued", progress=0, download_progress=0.0,
+            error="", message="Đang chờ chạy lại từ đầu…",
+            facebook_video_id="", facebook_url="", upload_finished=False,
+            clip_ready=False, thumbnail_set=False, cut=None, intro_outro=None,
+            comment_posted=False, comment_id="", comment_error="",
+            updated_at=time.time(),
+        )
+        _save(task)
+        _pool.submit(_run, task_id, {**config, "facebook_api_version": task["api_version"]})
+        return _public(task)
+
+
 def artifact(task_id: str, name: str) -> tuple[Path, str] | None:
     task = get_task(task_id)
     if not task or name not in ("clip", "thumbnail", "cover"):

@@ -53,6 +53,17 @@ def resume_flow(task_id: str) -> dict:
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/facebook/flows/{task_id}/retry", status_code=202)
+def retry_flow(task_id: str) -> dict:
+    """Chạy lại từ đầu flow đang lỗi (tải/cắt/ghép/upload lại toàn bộ)."""
+    try:
+        return facebook_flow.retry_task(task_id)
+    except KeyError:
+        raise HTTPException(404, "Không tìm thấy flow.")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/facebook/flows/{task_id}/cancel", status_code=202)
 def cancel_flow(task_id: str) -> dict:
     try:

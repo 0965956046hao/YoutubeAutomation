@@ -201,6 +201,23 @@ def _thumbnail_local_path(video_id: str):
 class AnalyzedSaveIn(BaseModel):
     info: dict
     ai: dict | None = None
+    # Nguồn tạo entry: "analyze" (tab Phân tích) hoặc "facebook-flow"
+    # (nút gen cover bên tab Facebook — ẩn khỏi danh sách Phân tích).
+    origin: str = "analyze"
+
+
+def _entry_origin(video_id: str, data: dict) -> str:
+    """Nguồn của entry đã lưu. Suy luận cho bản lưu cũ (chưa có origin):
+    chỉ có .cover.png mà không có .generated.png → do Facebook-flow tạo,
+    vì tab Phân tích không bao giờ ghi file .cover.png."""
+    origin = (data.get("origin") or "").strip()
+    if origin:
+        return origin
+    directory = _analyzed_dir()
+    if ((directory / f"{video_id}.cover.png").exists()
+            and not (directory / f"{video_id}.generated.png").exists()):
+        return "facebook-flow"
+    return "analyze"
 
 
 @router.get("/analyzed")
@@ -210,19 +227,23 @@ def list_analyzed() -> dict:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             info = data.get("info", {})
+            video_id = info.get("video_id", f.stem)
+            # Entry do Facebook-flow tạo (gen cover) không thuộc tab Phân tích.
+            if _entry_origin(video_id, data) != "analyze":
+                continue
             items.append({
-                "video_id": info.get("video_id", f.stem),
+                "video_id": video_id,
                 "title": info.get("title", ""),
                 "channel_title": info.get("channel_title", ""),
                 "thumbnail": info.get("thumbnail", ""),
                 "thumbnail_local": (
-                    f"/api/analyzed/{info.get('video_id', f.stem)}/image"
-                    if _thumbnail_local_path(info.get("video_id", f.stem)).exists()
+                    f"/api/analyzed/{video_id}/image"
+                    if _thumbnail_local_path(video_id).exists()
                     else ""
                 ),
                 "has_ai": bool((data.get("ai") or {}).get("translation")),
-                "has_generated_thumbnail": (_analyzed_dir() / f"{info.get('video_id', f.stem)}.generated.png").exists(),
-                "has_cover": (_analyzed_dir() / f"{info.get('video_id', f.stem)}.cover.png").exists(),
+                "has_generated_thumbnail": (_analyzed_dir() / f"{video_id}.generated.png").exists(),
+                "has_cover": (_analyzed_dir() / f"{video_id}.cover.png").exists(),
                 "saved_at": data.get("saved_at", 0),
             })
         except Exception:
@@ -238,6 +259,9 @@ def save_analyzed(body: AnalyzedSaveIn) -> dict:
         raise HTTPException(400, "Thiếu video_id.")
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
         raise HTTPException(400, "video_id không hợp lệ.")
+    origin = (body.origin or "analyze").strip() or "analyze"
+    if origin not in ("analyze", "facebook-flow"):
+        raise HTTPException(400, "origin chỉ nhận 'analyze' hoặc 'facebook-flow'.")
     # Tải thumbnail về đĩa ngay lúc lưu — link YT chết vẫn còn ảnh.
     thumb_saved = False
     try:
@@ -250,6 +274,7 @@ def save_analyzed(body: AnalyzedSaveIn) -> dict:
     payload = {
         "info": body.info,
         "ai": body.ai,
+        "origin": origin,
         "saved_at": time.time(),
         "thumbnail_local": f"/api/analyzed/{video_id}/image" if thumb_saved else "",
     }
@@ -363,6 +388,12 @@ def delete_analyzed(video_id: str) -> dict:
     if generated.exists():
         try:
             generated.unlink()
+        except OSError:
+            pass
+    cover = _analyzed_dir() / f"{video_id}.cover.png"
+    if cover.exists():
+        try:
+            cover.unlink()
         except OSError:
             pass
     return {"status": "ok", "removed": f.exists() is False}

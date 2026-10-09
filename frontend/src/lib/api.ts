@@ -182,6 +182,10 @@ export async function resumeFacebookFlow(taskId: string): Promise<FacebookFlowTa
   return (await api.post(`/facebook/flows/${taskId}/resume`)).data;
 }
 
+export async function retryFacebookFlow(taskId: string): Promise<FacebookFlowTask> {
+  return (await api.post(`/facebook/flows/${taskId}/retry`)).data;
+}
+
 export async function cancelFacebookFlow(taskId: string): Promise<FacebookFlowTask> {
   return (await api.post(`/facebook/flows/${taskId}/cancel`)).data;
 }
@@ -391,8 +395,9 @@ export async function listSavedVideos(): Promise<SavedVideoSummary[]> {
 export async function saveAnalyzedVideo(
   info: AnalyzeResult,
   ai: TitleAiResult | null,
+  origin?: "analyze" | "facebook-flow",
 ): Promise<{ status: string; video_id: string; thumbnail_saved: boolean }> {
-  const res = await api.post("/analyzed", { info, ai });
+  const res = await api.post("/analyzed", { info, ai, origin: origin || "analyze" });
   return res.data;
 }
 
