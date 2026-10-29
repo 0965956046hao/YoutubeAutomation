@@ -14,7 +14,7 @@ import { startVideoDownload } from "@/lib/downloads";
 import { DownloadIcon } from "@/components/icons";
 import YoutubeCookies from "@/components/YoutubeCookies";
 
-type CookieBrowser = "chrome" | "firefox" | "safari" | "edge" | "brave";
+type CookieBrowser = "" | "chrome" | "firefox" | "safari" | "edge" | "brave";
 
 function restrictionLabels(video: OwnedVideoItem): string[] {
   const labels: string[] = [];
@@ -42,7 +42,7 @@ export default function RestrictedVideos({
 }) {
   const [videos, setVideos] = useState<OwnedVideoItem[]>([]);
   const [checked, setChecked] = useState<Set<string>>(new Set());
-  const [browser, setBrowser] = useState<CookieBrowser>("chrome");
+  const [browser, setBrowser] = useState<CookieBrowser>("");
   const [loading, setLoading] = useState(false);
   const [queueBusy, setQueueBusy] = useState(false);
   const [error, setError] = useState("");
@@ -159,6 +159,7 @@ export default function RestrictedVideos({
                 Trình duyệt đã login YouTube
               </span>
               <select className="input-field !py-2" value={browser} onChange={(e) => setBrowser(e.target.value as CookieBrowser)}>
+                <option value="">Tự động lấy cookie (mặc định)</option>
                 <option value="chrome">Google Chrome</option>
                 <option value="firefox">Firefox</option>
                 <option value="safari">Safari</option>

@@ -40,14 +40,66 @@ def youtube_cookies_file() -> Path | None:
     return None
 
 
-def cookies_args(browser: str = "") -> list[str]:
-    """Ưu tiên file cookies.txt (ổn định hơn) rồi mới tới cookie trình duyệt."""
-    cookies_file = youtube_cookies_file()
-    if cookies_file is not None:
-        return ["--cookies", str(cookies_file)]
+#: Sau khoảng này YouTube thường đã vô hiệu hóa phiên trong cookies.txt
+#: (thực tế user thấy ~2h) → cảnh báo xuất lại file mới.
+COOKIES_STALE_HOURS = 1.5
+
+
+def cookies_age_hours() -> float | None:
+    """Tuổi của cookies.txt đã upload (giờ), None nếu chưa có file."""
+    import time
+
+    path = youtube_cookies_file()
+    if path is None:
+        return None
+    try:
+        return max(0.0, (time.time() - path.stat().st_mtime) / 3600)
+    except OSError:
+        return None
+
+
+def resolve_cookie_browser(browser: str = "") -> str:
+    """Empty (including old saved requests) means auto-detect, never anonymous.
+
+    Prefer an existing Chromium/Firefox cookie database. yt-dlp handles
+    profile selection and decryption; only inspect paths here, not cookies.
+    """
     if browser:
-        return ["--cookies-from-browser", browser]
-    return []
+        return browser
+    home = Path.home()
+    roots = [
+        ("chrome", home / "Library/Application Support/Google/Chrome"),
+        ("edge", home / "Library/Application Support/Microsoft Edge"),
+        ("brave", home / "Library/Application Support/BraveSoftware/Brave-Browser"),
+        ("firefox", home / "Library/Application Support/Firefox/Profiles"),
+        ("chrome", home / ".config/google-chrome"),
+        ("edge", home / ".config/microsoft-edge"),
+        ("brave", home / ".config/BraveSoftware/Brave-Browser"),
+        ("firefox", home / ".mozilla/firefox"),
+    ]
+    for name, root in roots:
+        if root.is_dir() and any(
+            next(root.glob(pattern), None) is not None
+            for pattern in ("*/Cookies", "*/Network/Cookies", "*/cookies.sqlite")
+        ):
+            return name
+    if (home / "Library/Cookies/Cookies.binarycookies").is_file():
+        return "safari"
+    # Still attempt extraction, so missing browser/access errors are visible.
+    return "chrome"
+
+
+def cookies_args(browser: str = "", *, skip_file: bool = False) -> list[str]:
+    """Ưu tiên file cookies.txt (ổn định hơn) rồi mới tới cookie trình duyệt.
+
+    browser rỗng: tự dò trình duyệt, áp dụng cả tác vụ đã lưu trước đây.
+    skip_file=True: bỏ qua file đã upload, đọc phiên hiện tại từ trình duyệt.
+    """
+    if not skip_file:
+        cookies_file = youtube_cookies_file()
+        if cookies_file is not None:
+            return ["--cookies", str(cookies_file)]
+    return ["--cookies-from-browser", resolve_cookie_browser(browser)]
 
 
 def is_bot_check_error(text: str) -> bool:
@@ -58,23 +110,25 @@ def is_bot_check_error(text: str) -> bool:
 def bot_check_hint(browser: str = "") -> str:
     """Hướng dẫn khắc phục lỗi bot-check của YouTube, tùy theo cách đã thử."""
     if youtube_cookies_file() is not None:
-        return (
+        hint = (
             "YouTube vẫn chặn dù đã có cookies.txt: mở YouTube trên trình duyệt đã "
             "xuất cookie, đăng nhập lại nếu bị đăng xuất, xuất lại file cookies.txt "
             "mới (extension Get cookies.txt LOCALLY, tick youtube.com) rồi upload lại. "
             "Nếu vừa đổi IP/VPN hoặc xác minh nhiều lần, chờ một lúc rồi thử lại."
         )
-    if browser:
-        return (
-            f"Không đọc được phiên YouTube từ {browser} (trình duyệt khóa cookie, "
-            "chưa đăng nhập YouTube, hoặc backend chạy user khác). Cách chắc chắn: "
-            "xuất file cookies.txt từ trình duyệt đã đăng nhập YouTube rồi upload "
-            "ở mục Cookie YouTube — backend sẽ ưu tiên dùng file này."
-        )
+        age = cookies_age_hours()
+        if age is not None and age >= COOKIES_STALE_HOURS:
+            hint += (
+                f" File hiện tại đã cũ ~{age:.1f} giờ — YouTube thường vô hiệu hóa "
+                "phiên sau ~2h nên khả năng cao phải xuất lại file mới."
+            )
+        return hint
+    browser = resolve_cookie_browser(browser)
     return (
-        "Video này yêu cầu đăng nhập YouTube (bot-check). Chọn trình duyệt đã "
-        "đăng nhập YouTube ở mục Cookie, hoặc upload file cookies.txt xuất từ "
-        "trình duyệt đó rồi chạy lại."
+        f"Đã thử cookie từ {browser} nhưng YouTube vẫn yêu cầu xác minh. "
+        "Hãy kiểm tra đúng profile đã đăng nhập và quyền đọc cookie. Có thể "
+        "xuất file cookies.txt từ trình duyệt đã đăng nhập YouTube rồi upload "
+        "ở mục Cookie YouTube — backend sẽ ưu tiên dùng file này."
     )
 
 
@@ -202,12 +256,11 @@ def download_video(video_id: str, quality: str = "best", cookies_from_browser: s
         *_challenge_solver_arg(),
         "-o", template,
     ]
-    # Lần 1: client mặc định. Lần 2: ép player_client=android để né lỗi
-    # SABR/PO-token ("Requested format is not available") của YouTube 2026.
+    # web_safari supports account cookies; android does not.
     attempts = [
         base + ["-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", "bv*+ba/b", url],
+        base + ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt, url],
+        base + ["--extractor-args", "youtube:player_client=web_safari", "-f", "bv*+ba/b", url],
     ]
     last_err = ""
     for cmd in attempts:

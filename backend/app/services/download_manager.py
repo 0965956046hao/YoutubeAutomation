@@ -180,8 +180,8 @@ def _run_task(task_id: str) -> None:
     ]
     attempts = [
         base + ["-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", "bv*+ba/b", url],
+        base + ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt, url],
+        base + ["--extractor-args", "youtube:player_client=web_safari", "-f", "bv*+ba/b", url],
     ]
     last_err = ""
     for i, cmd in enumerate(attempts):
@@ -232,11 +232,6 @@ def _run_task(task_id: str) -> None:
         raw_err = last_err or "không rõ nguyên nhân"
         if is_bot_check_error(raw_err):
             last_err = f"{raw_err} | {bot_check_hint(cookies_from_browser)}"
-        elif cookies_from_browser:
-            last_err += (
-                f" | Không đọc được phiên YouTube từ {cookies_from_browser}. "
-                "Hãy đăng nhập YouTube trên trình duyệt đó rồi thử lại."
-            )
         _set(task_id, status="error",
              error=f"Tải thất bại: {last_err or 'không rõ nguyên nhân'}",
              message="Tải thất bại.")

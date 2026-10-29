@@ -349,11 +349,14 @@ export interface AnalyzeResult {
   warning: string;
 }
 
+export type AnalysisLanguage = "vi" | "en";
+
 export interface TitleAiResult {
   translation: string;
   options: string[];
   raw: string;
   model: string;
+  language?: AnalysisLanguage;
 }
 
 export async function analyzeLink(url: string): Promise<AnalyzeResult> {
@@ -361,8 +364,8 @@ export async function analyzeLink(url: string): Promise<AnalyzeResult> {
   return res.data;
 }
 
-export async function suggestTitles(title: string): Promise<TitleAiResult> {
-  const res = await api.post<TitleAiResult>("/analyze/title-ai", { title });
+export async function suggestTitles(title: string, language: AnalysisLanguage = "vi"): Promise<TitleAiResult> {
+  const res = await api.post<TitleAiResult>("/analyze/title-ai", { title, language });
   return res.data;
 }
 
@@ -420,6 +423,7 @@ export async function generateChatGptThumbnail(body: {
   title: string;
   part: number;
   prompt?: string;
+  language?: AnalysisLanguage;
 }): Promise<{ status: "done"; image: Blob } | { status: "need_login"; detail: string }> {
   const res = await fetch("/api/chatgpt-thumbnail", {
     method: "POST",

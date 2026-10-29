@@ -3,6 +3,7 @@
 import json
 import re
 import time
+from typing import Literal
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -29,6 +30,7 @@ class AnalyzeIn(BaseModel):
 class TitleAiIn(BaseModel):
     title: str
     model: str = "gemini-3.1-flash-lite"
+    language: Literal["vi", "en"] = "vi"
 
 
 def extract_video_id(url: str) -> str:
@@ -133,7 +135,7 @@ def analyze(body: AnalyzeIn) -> dict:
 
 @router.post("/analyze/title-ai")
 def title_ai(body: TitleAiIn) -> dict:
-    """Dịch tiêu đề sang tiếng Việt + gợi ý 3-4 tiêu đề ~70 ký tự (Gemini)."""
+    """Dịch và gợi ý 3-4 tiêu đề ~70 ký tự theo ngôn ngữ đã chọn."""
     from app.services.gemini import DEFAULT_MODEL, generate_with_fallback
 
     title = (body.title or "").strip()
@@ -141,9 +143,11 @@ def title_ai(body: TitleAiIn) -> dict:
         raise HTTPException(400, "Thiếu tiêu đề.")
     data = store.load_config()
     api_key = data.get("gemini_api_key", "")
+    language_name = "tiếng Anh" if body.language == "en" else "tiếng Việt"
     prompt = (
-        "Dịch tiêu đề video sau sang tiếng Việt và gợi ý tiêu đề hấp dẫn "
+        f"Dịch tiêu đề video sau sang {language_name} và gợi ý tiêu đề hấp dẫn "
         "giúp tôi, mỗi tiêu đề khoảng 70 ký tự, giữ đúng nội dung gốc.\n"
+        f"Toàn bộ translation và options phải viết bằng {language_name}.\n"
         f'Tiêu đề: "{title}"\n'
         "Trả về đúng JSON (không giải thích thêm): "
         '{"translation": "<bản dịch raw>", '
@@ -170,7 +174,7 @@ def title_ai(body: TitleAiIn) -> dict:
         translation, options = cleaned, []
     if not translation and not options:
         raise HTTPException(502, f"Gemini trả về không parse được: {raw[:300]}")
-    return {"translation": translation, "options": options, "raw": raw, "model": used_model}
+    return {"translation": translation, "options": options, "raw": raw, "model": used_model, "language": body.language}
 
 
 # ── Lưu phân tích (backend/temp/analyzed/{video_id}.json + {video_id}.jpg) ──

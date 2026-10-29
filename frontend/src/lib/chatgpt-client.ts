@@ -6,7 +6,7 @@ import puppeteer, { type Browser, type ElementHandle, type Page } from "puppetee
 export const CHATGPT_URL = process.env.CHATGPT_URL || "https://chatgpt.com/";
 const CHATGPT_PORT = Number(process.env.CHATGPT_PORT || "9233");
 const PROFILE_DIR = process.env.CHATGPT_PROFILE_DIR || path.join(os.homedir(), ".yt-recent-videos", "chatgpt-profile");
-const GENERATE_TIMEOUT_MS = Number(process.env.CHATGPT_GENERATE_TIMEOUT || "300000");
+const GENERATE_TIMEOUT_MS = Number(process.env.CHATGPT_GENERATE_TIMEOUT || "600000");
 
 function chromePath(): string {
   const candidates = [

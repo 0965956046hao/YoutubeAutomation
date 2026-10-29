@@ -415,7 +415,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("--progress", attempts[0])
         self.assertIn("--newline", attempts[0])
         self.assertIn("--cookies-from-browser", attempts[0])
-        self.assertIn("youtube:player_client=android", attempts[1])
+        self.assertIn("youtube:player_client=web_safari", attempts[1])
         self.assertEqual(facebook_flow.get_task(task_id)["download_progress"], 100)
 
     def test_cancel_queued_task_keeps_history_and_never_starts(self):
@@ -523,6 +523,129 @@ class FlowTests(unittest.TestCase):
         client.assert_not_called()
         facebook_flow.delete_task(task_id)
         self.assertIsNone(facebook_flow.get_task(task_id))
+
+    def test_download_falls_back_to_live_browser_when_file_blocked(self):
+        task_id = self._task()
+        directory = settings.temp_dir / "facebook_flows" / task_id
+        (settings.temp_dir / "youtube_cookies.txt").write_text(
+            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+            encoding="utf-8",
+        )
+        commands = []
+
+        def run(command, report, **_kwargs):
+            commands.append(command)
+            if len(commands) < 4:
+                raise RuntimeError("ERROR: Sign in to confirm you're not a bot")
+            (directory / "source.mp4").write_bytes(b"video")
+
+        with patch.object(facebook_flow, "_run_download", side_effect=run), \
+             patch.object(facebook_flow, "yt_dlp_command", return_value=[sys.executable, "-m", "yt_dlp"]):
+            result = facebook_flow._download("dQw4w9WgXcQ", directory, "chrome", task_id)
+        self.assertEqual(result, directory / "source.mp4")
+        self.assertEqual(len(commands), 4)
+        # 3 lần đầu dùng file, lần cuối đọc phiên live từ trình duyệt.
+        self.assertIn("--cookies", commands[0])
+        self.assertNotIn("--cookies-from-browser", commands[0])
+        self.assertIn("--cookies-from-browser", commands[3])
+        self.assertNotIn("--cookies", commands[3])
+
+    def test_auto_browser_fallback_for_old_requests_without_selected_browser(self):
+        task_id = self._task()
+        directory = settings.temp_dir / "facebook_flows" / task_id
+        (settings.temp_dir / "youtube_cookies.txt").write_text(
+            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+            encoding="utf-8",
+        )
+        calls = []
+
+        def run(command, report, **_kwargs):
+            calls.append(command)
+            raise RuntimeError("ERROR: Sign in to confirm you're not a bot")
+
+        with patch.object(facebook_flow, "_run_download", side_effect=run), \
+             patch.object(facebook_flow, "yt_dlp_command", return_value=[sys.executable, "-m", "yt_dlp"]):
+            with self.assertRaisesRegex(RuntimeError, "xuất lại"):
+                facebook_flow._download("dQw4w9WgXcQ", directory, "", task_id)
+        self.assertEqual(len(calls), 4)
+        self.assertIn("--cookies-from-browser", calls[-1])
+        self.assertNotIn("youtube:player_client=android", calls[-1])
+
+    def _queued_task(self, **overrides):
+        import uuid as _uuid
+
+        task_id = _uuid.uuid4().hex[:12]
+        path = settings.temp_dir / "facebook_flows" / task_id
+        path.mkdir(parents=True)
+        body = FacebookFlowIn(video_id="dQw4w9WgXcQ", **overrides)
+        task = {"task_id": task_id, "status": "queued", "progress": 0, "created_at": 3,
+                "video_id": "dQw4w9WgXcQ", "title": "Test", "page_id": "456",
+                "api_version": "v25.0", "facebook_video_id": "", "facebook_url": "",
+                "upload_finished": False, "clip_ready": False, "thumbnail_set": False,
+                "cut": None, "comment_posted": False, "comment_id": "",
+                "comment_error": "", "request": body.model_dump()}
+        facebook_flow._tasks[task_id] = task
+        facebook_flow._save(task)
+        return task_id
+
+    def _run_with_mocks(self, task_id: str, *, full_video: bool):
+        class FakeFacebook:
+            def __init__(self, config, *, cancel=None):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def check_page(self):
+                return {"name": "Test Page"}
+
+            def upload(self, path, title, caption, update):
+                update(facebook_video_id="vid1")
+
+            def wait_ready(self, _video_id):
+                return {"published": True, "status": {"video_status": "ready"},
+                        "permalink_url": "https://www.facebook.com/watch/?v=vid1"}
+
+        def fake_download(video_id, dest, _browser, _task_id, cancel=None):
+            src = dest / "source.mp4"
+            src.write_bytes(b"fake-source")
+            return src
+
+        def fake_finalize(source, output, cancel=None):
+            output.write_bytes(b"fake-clip")
+            return 60.0
+
+        with patch.object(store, "get_valid_tokens", return_value=None), \
+             patch.object(facebook_flow, "get_video", return_value={
+                 "title": "T", "description": "", "tags": [], "channel_title": "C"}), \
+             patch.object(facebook_flow, "_thumbnail", return_value=None), \
+             patch.object(facebook_flow, "_download", side_effect=fake_download), \
+             patch.object(facebook_flow, "finalize_full", side_effect=fake_finalize), \
+             patch.object(facebook_flow, "find_cut", return_value={
+                 "seconds": 60.0, "source_duration": 120.0, "reason": "test"}), \
+             patch.object(facebook_flow, "cut_video",
+                           side_effect=lambda s, o, _sec, cancel=None: o.write_bytes(b"fake-clip")), \
+             patch.object(facebook_flow, "FacebookClient", FakeFacebook), \
+             patch.object(facebook_flow, "assemble_intro_outro",
+                           return_value={"intro_seconds": 0.1, "outro_seconds": 10.0,
+                                         "duration": 70.0, "cover_ai": False}) as assemble:
+            facebook_flow._run(task_id, {"facebook_page_id": "456",
+                                         "facebook_page_token": "secret",
+                                         "facebook_api_version": "v25.0"})
+        if full_video:
+            assemble.assert_not_called()
+        else:
+            assemble.assert_called_once()
+        self.assertEqual(facebook_flow.get_task(task_id)["status"], "done")
+
+    def test_full_video_skips_intro_outro(self):
+        self._run_with_mocks(self._queued_task(full_video=True), full_video=True)
+
+    def test_cut_video_includes_intro_outro(self):
+        self._run_with_mocks(self._queued_task(), full_video=False)
 
     def test_cancellation_during_download_does_not_retry(self):
         task_id = self._task()

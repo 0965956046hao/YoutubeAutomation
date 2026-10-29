@@ -25,7 +25,9 @@ from app.services.downloader import (
     cookies_args,
     download_title,
     is_bot_check_error,
+    resolve_cookie_browser,
     yt_dlp_command,
+    youtube_cookies_file,
 )
 from app.services.facebook_client import FacebookClient, build_blocked_comment, build_caption
 from app.services.fb_assembly import assemble_intro_outro
@@ -330,22 +332,27 @@ def _run_download(
 def _download(
     video_id: str, directory: Path, browser: str, task_id: str, *, cancel: Cancellation | None = None,
 ) -> Path:
+    browser = resolve_cookie_browser(browser)
     fmt = _format_for("1080")
     url = f"https://www.youtube.com/watch?v={video_id}"
-    base = [
-        *yt_dlp_command(), "--no-playlist", "--no-warnings", "--newline", "--progress",
-        "--progress-delta", "1", "--progress-template", "download:[download] %(progress._percent_str)s",
-        "--merge-output-format", "mp4", "--retries", "3", "--fragment-retries", "3",
-        *cookies_args(browser),
-        *_js_runtime_arg(), *_challenge_solver_arg(),
-        "-o", str(directory / "source.%(ext)s"),
-    ]
-    # Lần 1: client mặc định. Lần 2-3: ép player_client=android để né lỗi
-    # "The page needs to be reloaded" / SABR của YouTube 2026.
+
+    def build(cookies: list[str], extra: list[str]) -> list[str]:
+        return [
+            *yt_dlp_command(), "--no-playlist", "--no-warnings", "--newline", "--progress",
+            "--progress-delta", "1", "--progress-template", "download:[download] %(progress._percent_str)s",
+            "--merge-output-format", "mp4", "--retries", "3", "--fragment-retries", "3",
+            *cookies,
+            *_js_runtime_arg(), *_challenge_solver_arg(),
+            "-o", str(directory / "source.%(ext)s"),
+            *extra,
+        ]
+
+    file_cookies = cookies_args(browser)
+    # Retry with a web client that supports account cookies (android does not).
     attempts = [
-        base + ["-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", fmt, url],
-        base + ["--extractor-args", "youtube:player_client=android", "-f", "bv*+ba/b", url],
+        build(file_cookies, ["-f", fmt, url]),
+        build(file_cookies, ["--extractor-args", "youtube:player_client=web_safari", "-f", fmt, url]),
+        build(file_cookies, ["--extractor-args", "youtube:player_client=web_safari", "-f", "bv*+ba/b", url]),
     ]
     def report_progress(percent: float) -> None:
         message = f"Đang tải từ YouTube… {percent:.1f}%"
@@ -365,13 +372,29 @@ def _download(
         except RuntimeError as exc:
             last_err = str(exc)[-500:]
     else:
-        msg = f"Tải video thất bại: {last_err}"
-        if is_bot_check_error(last_err):
-            msg += f" | {bot_check_hint(browser)}"
-        elif not browser:
-            msg += (" | Video bị chặn/bảo vệ thường cần cookie YouTube: chọn trình duyệt "
-                    "đã đăng nhập YouTube ở mục Cookie rồi chạy lại.")
-        raise RuntimeError(msg)
+        # Cầu chì cuối: file cookies.txt bị chặn nhưng user có chọn trình duyệt
+        # dự phòng → đọc thẳng phiên live từ trình duyệt đang mở (luôn mới).
+        if (browser and youtube_cookies_file() is not None
+                and is_bot_check_error(last_err)):
+            _update(task_id, download_progress=0.0,
+                    message=f"Cookie file bị chặn, thử đọc phiên live từ {browser}…")
+            try:
+                _run_download(
+                    build(cookies_args(browser, skip_file=True),
+                          ["-f", "bv*+ba/b", url]),
+                    report_progress, cancel=cancel,
+                )
+            except RuntimeError as exc:
+                last_err = str(exc)[-500:]
+            else:
+                last_err = ""
+        if last_err:
+            msg = f"Tải video thất bại: {last_err}"
+            if is_bot_check_error(last_err):
+                msg += f" | {bot_check_hint(browser)}"
+            elif "claimed content" in last_err.lower():
+                msg += " | YouTube báo chặn bản quyền; cookie không đảm bảo mở được video này."
+            raise RuntimeError(msg)
     for path in directory.glob("source.*"):
         if path.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov"):
             _update(task_id, download_progress=100.0, message="Đã tải và ghép video xong.")
@@ -549,11 +572,12 @@ def _run(task_id: str, config: dict, resume: bool = False) -> None:
                     source.unlink(missing_ok=True)
                 except OSError:
                     pass
-            if body.add_intro_outro:
+            if body.add_intro_outro and not body.full_video:
                 # Sau khi cắt: chuẩn hoá cover 1088×1446 (ưu tiên ảnh ChatGPT
                 # đã gen cho video), chèn vào đầu (giữ tỉ lệ + căn giữa) và
-                # thêm outro template YT ở cuối. Không có cover AI thì dùng
-                # thumbnail gốc upscale để không kẹt hàng đợi.
+                # thêm outro template YT ở cuối. Video bị chặn (upload full)
+                # thì giữ nguyên bản gốc, không chèn intro/outro.
+                # Không có cover AI thì dùng thumbnail gốc upscale để không kẹt hàng đợi.
                 _update(task_id, status="cutting", progress=58,
                         message="Đang chuẩn hoá cover 1088×1446 + ghép intro/outro…")
                 meta = assemble_intro_outro(

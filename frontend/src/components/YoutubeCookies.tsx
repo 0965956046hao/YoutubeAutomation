@@ -8,7 +8,7 @@ import {
 } from "@/lib/api";
 
 /** Upload/lưu file cookies.txt để vượt bot-check YouTube khi tải video bị chặn. */
-export default function YoutubeCookies({ compact = false }: { compact?: boolean }) {
+export default function YoutubeCookies({ compact = false, onStatusChange }: { compact?: boolean; onStatusChange?: (hasCookies: boolean) => void }) {
   const [hasCookies, setHasCookies] = useState(false);
   const [size, setSize] = useState(0);
   const [mtime, setMtime] = useState(0);
@@ -22,6 +22,7 @@ export default function YoutubeCookies({ compact = false }: { compact?: boolean 
       setHasCookies(status.has_cookies);
       setSize(status.size);
       setMtime(status.mtime);
+      onStatusChange?.(status.has_cookies);
     } catch {
       /* backend chưa chạy — giữ trạng thái cũ */
     }
@@ -29,6 +30,7 @@ export default function YoutubeCookies({ compact = false }: { compact?: boolean 
 
   useEffect(() => {
     void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleFile(file: File | undefined) {
@@ -87,6 +89,12 @@ export default function YoutubeCookies({ compact = false }: { compact?: boolean 
       {hasCookies && mtime > 0 && (
         <p className="mt-1.5 text-[11px] text-ink-light">
           Cập nhật: {new Date(mtime * 1000).toLocaleString("vi-VN")}
+        </p>
+      )}
+      {hasCookies && mtime > 0 && (Date.now() / 1000 - mtime) > 90 * 60 && (
+        <p className="mt-1.5 text-[11px] text-amber-200" role="status">
+          File đã cũ ~{Math.round((Date.now() / 1000 - mtime) / 3600 * 10) / 10} giờ — YouTube thường khóa phiên sau ~2h.
+          Nếu tải báo lỗi bot-check, hãy xuất lại file mới rồi upload lại.
         </p>
       )}
       <details className="mt-2 text-[11px] leading-relaxed text-ink-muted">

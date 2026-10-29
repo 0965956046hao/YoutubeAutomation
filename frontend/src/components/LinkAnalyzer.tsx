@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AnalyzeResult,
+  AnalysisLanguage,
   SavedVideoSummary,
   TitleAiResult,
   analyzeLink,
@@ -25,10 +26,16 @@ import {
   thumbnailUrl,
 } from "@/lib/api";
 import { DownloadIcon } from "@/components/icons";
+import { buildThumbnailPrompt, ThumbnailPromptStyle } from "@/lib/thumbnail-prompts";
+
+const IMAGE_TITLE_OPTION = "__title_from_reference_image__";
 
 /** Tab Phân tích link: paste link YT bất kỳ → full info + Gemini gợi ý tiêu đề. */
 export default function LinkAnalyzer() {
   const [url, setUrl] = useState("");
+  const [language, setLanguage] = useState<AnalysisLanguage>("vi");
+  const languageName = language === "en" ? "tiếng Anh" : "tiếng Việt";
+  const partLabel = language === "en" ? "Part" : "Phần";
   const [info, setInfo] = useState<AnalyzeResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -46,6 +53,7 @@ export default function LinkAnalyzer() {
   const [thumbState, setThumbState] = useState<"live" | "local" | "gone">("live");
   const [thumbTitle, setThumbTitle] = useState("");
   const [gptPrompt, setGptPrompt] = useState("");
+  const [promptStyle, setPromptStyle] = useState<ThumbnailPromptStyle>("reference");
   const [gptBusy, setGptBusy] = useState(false);
   const [gptSaving, setGptSaving] = useState(false);
   const [gptMsg, setGptMsg] = useState("");
@@ -91,11 +99,15 @@ export default function LinkAnalyzer() {
   }
 
   function composeTitle(t: string): string {
-    return `Full Phần ${partNum} | ${t} | ${titleSuffix}`;
+    return `Full ${partLabel} ${partNum} | ${t} | ${titleSuffix}`;
   }
 
-  function buildGptPrompt(title = thumbTitle, part = partNum): string {
-    return `@Tạo hình ảnh Hãy tạo hình giống ảnh tham chiếu đính kèm để làm thumbnail cho video YouTube. Dịch tiêu đề sang tiếng Việt: "${title}". Giữ font đơn giản giống với font gốc, rõ ràng, dễ đọc, chữ nổi bật khi xem nhỏ. Chỉnh kích thước đúng thumbnail YouTube 16:9 (1280x720), dùng tông màu hài hòa trung tính, bớt chói. Bổ sung chữ "Phần ${part}" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải. Xóa toàn bộ chữ và logo gốc ở góc trên bên trái và góc trên bên phải trước khi đặt chữ mới. Giữ nguyên nhân vật chính, bối cảnh và phong cách; không thêm logo hoặc watermark mới. Chỉ tạo 1 ảnh hoàn chỉnh, không giải thích.`;
+  function buildGptPrompt(title = thumbTitle, part = partNum, targetLanguage = language, style = promptStyle): string {
+    return buildThumbnailPrompt(
+      title === IMAGE_TITLE_OPTION ? "" : title,
+      part, targetLanguage, style,
+      title === IMAGE_TITLE_OPTION ? "image" : "text",
+    );
   }
 
   function applyThumbnailTitle(title: string) {
@@ -134,7 +146,7 @@ export default function LinkAnalyzer() {
     setAiLoading(true);
     setAiError("");
     try {
-      const result = await suggestTitles(info.title);
+      const result = await suggestTitles(info.title, language);
       setAi(result);
       setThumbTitle("");
       setGptPrompt("");
@@ -162,6 +174,7 @@ export default function LinkAnalyzer() {
       const data = await getSavedVideo(videoId);
       setInfo(data.info);
       setAi(data.ai);
+      setLanguage(data.ai?.language || "vi");
       setAiError("");
       setSaveMsg("");
       setSavedThumb(data.thumbnail_local || "");
@@ -198,15 +211,16 @@ export default function LinkAnalyzer() {
   async function handleGenerateThumbnail() {
     if (!info || !thumbTitle.trim()) return;
     setGptBusy(true);
-    setGptMsg("Đang lưu ảnh gốc và chờ ChatGPT tạo ảnh (có thể mất 2–5 phút)…");
+    setGptMsg("Đang lưu ảnh gốc và chờ ChatGPT tạo ảnh (chờ tối đa 10 phút)…");
     try {
       await saveAnalyzedVideo(info, ai);
       const prompt = gptPrompt.trim() || buildGptPrompt();
       const result = await generateChatGptThumbnail({
         video_id: info.video_id,
-        title: thumbTitle.trim(),
+        title: thumbTitle === IMAGE_TITLE_OPTION ? "Dịch tiêu đề gốc trên hình" : thumbTitle.trim(),
         part: partNum,
         prompt,
+        language,
       });
       if (result.status === "need_login") {
         setGptMsg(result.detail);
@@ -249,6 +263,7 @@ export default function LinkAnalyzer() {
 
   const thumbnailTitleOptions = info
     ? [
+        { label: "Dịch tiêu đề gốc trên hình", value: IMAGE_TITLE_OPTION },
         { label: "Tiêu đề gốc", value: info.title },
         ...(ai?.translation ? [{ label: "Bản dịch raw", value: ai.translation }] : []),
         ...(ai?.options || []).map((value, index) => ({ label: `Gợi ý ${index + 1}`, value })),
@@ -262,7 +277,29 @@ export default function LinkAnalyzer() {
       {/* ── Ô paste link ── */}
       <div className="double-bezel animate-fade-up xl:col-span-2">
         <div className="double-bezel-inner p-5">
-          <span className="eyebrow">Phân tích link YouTube</span>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="eyebrow">Phân tích link YouTube</span>
+            <label className="flex items-center gap-2 text-[12px] text-ink-muted">
+              Ngôn ngữ đầu ra
+              <select
+                className="input-field !w-auto !py-1.5 !text-[12px]"
+                value={language}
+                disabled={aiLoading || gptBusy}
+                onChange={(e) => {
+                  const next = e.target.value as AnalysisLanguage;
+                  setLanguage(next);
+                  setAi(null);
+                  setAiError("");
+                  setSaveMsg("");
+                  setGptMsg("");
+                  setGptPrompt(thumbTitle ? buildGptPrompt(thumbTitle, partNum, next) : "");
+                }}
+              >
+                <option value="vi">Tiếng Việt</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+          </div>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
             <input
               className="input-field font-mono !text-[12px]"
@@ -690,7 +727,7 @@ export default function LinkAnalyzer() {
                 )}
                 {!ai && !aiError && (
                   <p className="mt-3 text-[12px] text-ink-light">
-                    Gemini sẽ dịch tiêu đề sang tiếng Việt và gợi ý 3–4 tiêu đề hấp dẫn khoảng 70 ký tự. Cần lưu Gemini API key ở tab Cấu hình trước.
+                    Gemini sẽ dịch tiêu đề sang {languageName} và gợi ý 3–4 tiêu đề hấp dẫn khoảng 70 ký tự. Cần lưu Gemini API key ở tab Cấu hình trước.
                   </p>
                 )}
               </div>
@@ -736,19 +773,41 @@ export default function LinkAnalyzer() {
                       <option value="">Chọn một tiêu đề…</option>
                       {thumbnailTitleOptions.map((option) => (
                         <option key={`${option.label}:${option.value}`} value={option.value}>
-                          {option.label} · {option.value}
+                          {option.label}{option.value !== IMAGE_TITLE_OPTION && ` · ${option.value}`}
                         </option>
                       ))}
                     </select>
                     <span className="mb-1 block text-[11px] font-medium text-ink-muted">Tiêu đề đã chọn / tùy chỉnh</span>
                     <input
                       className="input-field"
-                      value={thumbTitle}
+                      value={thumbTitle === IMAGE_TITLE_OPTION ? "" : thumbTitle}
+                      disabled={thumbTitle === IMAGE_TITLE_OPTION}
                       onChange={(e) => applyThumbnailTitle(e.target.value)}
-                      placeholder="Mặc định để trống…"
+                      placeholder={thumbTitle === IMAGE_TITLE_OPTION ? `Tự đọc tiêu đề trên hình và dịch sang ${languageName}` : "Mặc định để trống…"}
                     />
                   </label>
                 </div>
+
+                <label className="mt-3 block">
+                  <span className="mb-1 block text-[11px] font-medium text-ink-muted">Mẫu prompt thumbnail</span>
+                  <select
+                    className="input-field"
+                    value={promptStyle}
+                    disabled={gptBusy}
+                    onChange={(e) => {
+                      const next = e.target.value as ThumbnailPromptStyle;
+                      setPromptStyle(next);
+                      setGptPrompt(thumbTitle ? buildGptPrompt(thumbTitle, partNum, language, next) : "");
+                      setGptMsg("");
+                    }}
+                  >
+                    <option value="reference">1 · Giữ phong cách ảnh gốc</option>
+                    <option value="cinematic-3d">2 · Cinematic 3D CGI / Donghua cao cấp</option>
+                  </select>
+                  <span className="mt-1 block text-[11px] text-ink-light">
+                    Prompt theo ngôn ngữ đầu ra ({languageName}), tiêu đề và số phần đã chọn. Đổi mẫu sẽ thay nội dung prompt hiện tại.
+                  </span>
+                </label>
 
                 <label className="mt-3 block">
                   <span className="mb-1 block text-[11px] font-medium text-ink-muted">Prompt gửi ChatGPT (được phép chỉnh sửa)</span>
@@ -767,7 +826,7 @@ export default function LinkAnalyzer() {
                     disabled={gptBusy || !thumbTitle.trim()}
                     onClick={handleGenerateThumbnail}
                   >
-                    {gptBusy ? "ChatGPT đang tạo ảnh…" : `Tạo thumbnail · Phần ${partNum}`}
+                    {gptBusy ? "ChatGPT đang tạo ảnh…" : `Tạo thumbnail · ${partLabel} ${partNum}`}
                   </button>
                   <button
                     className="btn-island-secondary btn-sm"

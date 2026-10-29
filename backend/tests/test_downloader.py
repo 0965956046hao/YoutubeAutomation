@@ -69,9 +69,21 @@ class YtDlpCommandTests(unittest.TestCase):
 
 
 class YoutubeCookiesTests(unittest.TestCase):
+    def test_auto_detects_browser_with_existing_cookie_database(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(Path, "home", return_value=Path(temp)):
+            profile = Path(temp) / "Library/Application Support/Firefox/Profiles/default"
+            profile.mkdir(parents=True)
+            (profile / "cookies.sqlite").touch()
+            self.assertEqual(downloader.resolve_cookie_browser(), "firefox")
+            self.assertEqual(downloader.resolve_cookie_browser("edge"), "edge")
+            with patch.object(settings, "temp_dir", Path(temp)):
+                self.assertEqual(downloader.cookies_args(), ["--cookies-from-browser", "firefox"])
+
     def test_cookies_file_takes_priority_over_browser(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "temp_dir", Path(temp)):
-            self.assertEqual(downloader.cookies_args(""), [])
+            self.assertEqual(downloader.cookies_args(""), [
+                "--cookies-from-browser", downloader.resolve_cookie_browser(),
+            ])
             self.assertEqual(downloader.cookies_args("chrome"), ["--cookies-from-browser", "chrome"])
             (Path(temp) / "youtube_cookies.txt").write_bytes(b"")
             self.assertEqual(downloader.cookies_args("chrome"), ["--cookies-from-browser", "chrome"])
@@ -81,6 +93,20 @@ class YoutubeCookiesTests(unittest.TestCase):
             )
             args = downloader.cookies_args("chrome")
             self.assertEqual(args, ["--cookies", str(Path(temp) / "youtube_cookies.txt")])
+
+    def test_skip_file_reads_live_browser_cookies(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, "temp_dir", Path(temp)):
+            (Path(temp) / "youtube_cookies.txt").write_text(
+                "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                downloader.cookies_args("chrome", skip_file=True),
+                ["--cookies-from-browser", "chrome"],
+            )
+            self.assertEqual(downloader.cookies_args("", skip_file=True), [
+                "--cookies-from-browser", downloader.resolve_cookie_browser(),
+            ])
 
     def test_bot_check_error_hint_mentions_cookies_file(self):
         self.assertTrue(downloader.is_bot_check_error(
@@ -95,6 +121,26 @@ class YoutubeCookiesTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIn("xuất lại", downloader.bot_check_hint("chrome"))
+
+    def test_stale_cookies_hint_mentions_age(self):
+        import os
+        import time
+
+        with tempfile.TemporaryDirectory() as temp, patch.object(settings, "temp_dir", Path(temp)):
+            self.assertIsNone(downloader.cookies_age_hours())
+            path = Path(temp) / "youtube_cookies.txt"
+            path.write_text(
+                "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+                encoding="utf-8",
+            )
+            self.assertAlmostEqual(downloader.cookies_age_hours() or -1, 0.0, delta=0.1)
+            self.assertNotIn("đã cũ", downloader.bot_check_hint(""))
+            old = time.time() - 3 * 3600
+            os.utime(path, (old, old))
+            self.assertAlmostEqual(downloader.cookies_age_hours() or 0, 3.0, delta=0.1)
+            hint = downloader.bot_check_hint("")
+            self.assertIn("đã cũ", hint)
+            self.assertIn("~2h", hint)
 
     def test_cookies_upload_status_and_delete_roundtrip(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(settings, "temp_dir", Path(temp)):

@@ -87,6 +87,7 @@ export default function FacebookFlow({
   const [noiseDb, setNoiseDb] = useState(-35);
   const [silenceDuration, setSilenceDuration] = useState(0.5);
   const [browser, setBrowser] = useState<CookieBrowser>("");
+  const [hasCookies, setHasCookies] = useState(false);
   const [addIntroOutro, setAddIntroOutro] = useState(true);
   const [introSeconds, setIntroSeconds] = useState(0.1);
   const [outroSeconds, setOutroSeconds] = useState(10);
@@ -196,7 +197,7 @@ export default function FacebookFlow({
   async function handleGenerateCover() {
     if (!source || gptBusy) return;
     setGptBusy(true);
-    setGptMsg("Đang lưu ảnh gốc và chờ ChatGPT tạo cover 1088×1446 (có thể mất 2–5 phút)…");
+    setGptMsg("Đang lưu ảnh gốc và chờ ChatGPT tạo cover 1088×1446 (chờ tối đa 10 phút)…");
     try {
       await saveAnalyzedVideo(
         { ...source, tags: source.tags || [], hashtags: [], warning: "" },
@@ -450,15 +451,20 @@ export default function FacebookFlow({
                   <input className="input-field" type="number" required min={0.2} max={3} step={0.1} value={silenceDuration} onChange={(e) => setSilenceDuration(Number(e.target.value))} />
                 </label>
                 <label className="block">
-                  <span className="mb-1.5 block text-[12px] text-ink-muted">Cookie YouTube</span>
+                  <span className="mb-1.5 block text-[12px] text-ink-muted">Cookie trình duyệt (dự phòng)</span>
                   <select className="input-field" value={browser} onChange={(e) => setBrowser(e.target.value as CookieBrowser)}>
-                    <option value="">Không dùng</option>
+                    <option value="">Tự động lấy cookie (mặc định)</option>
                     <option value="chrome">Chrome</option><option value="firefox">Firefox</option>
                     <option value="safari">Safari</option><option value="edge">Edge</option><option value="brave">Brave</option>
                   </select>
+                  {hasCookies ? (
+                    <span className="mt-1.5 block text-[11px] text-emerald-300">Ưu tiên cookies.txt; tự đọc cookie trình duyệt nếu file gặp bot-check.</span>
+                  ) : (
+                    <span className="mt-1.5 block text-[11px] text-ink-light">Tự lấy cookie từ trình duyệt trên máy chạy backend. Chọn cụ thể nếu bạn đăng nhập YouTube ở trình duyệt khác.</span>
+                  )}
                 </label>
               </div>
-              <YoutubeCookies />
+              <YoutubeCookies onStatusChange={setHasCookies} />
               <div className="rounded-lg bg-white/[0.03] p-4 ring-1 ring-white/10">
                 <label className="flex cursor-pointer items-center gap-2 text-[13px] font-semibold">
                   <input type="checkbox" className="h-4 w-4 accent-[#4d93ff]"

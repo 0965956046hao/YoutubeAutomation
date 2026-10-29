@@ -18,15 +18,15 @@ export const dynamic = "force-dynamic";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8001";
 
-function makePrompt(title: string, part: number): string {
+function makePrompt(title: string, part: number, language: "vi" | "en"): string {
   return [
     "@Tạo hình ảnh",
     "Hãy tạo hình giống ảnh tham chiếu đính kèm để làm thumbnail cho video YouTube.",
-    `Dịch tiêu đề sang tiếng Việt: \"${title}\".`,
+    `Dịch tiêu đề sang ${language === "en" ? "tiếng Anh" : "tiếng Việt"}: \"${title}\".`,
     "Giữ font đơn giản giống với font gốc, rõ ràng, dễ đọc; chữ phải nổi bật khi xem ở kích thước nhỏ.",
     "Chỉnh bố cục và kích thước đúng tỷ lệ thumbnail YouTube 16:9 (1280x720).",
     "Dùng tông màu hài hòa, trung tính, bớt chói.",
-    `Bổ sung chữ \"Phần ${part}\" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải.`,
+    `Bổ sung chữ \"${language === "en" ? "Part" : "Phần"} ${part}\" thật to, rõ, cùng font với tiêu đề ở góc trên bên phải.`,
     "Xóa toàn bộ chữ và logo gốc ở góc trên bên trái và góc trên bên phải trước khi đặt chữ mới.",
     "Giữ nguyên nhân vật chính, bối cảnh và phong cách hình ảnh; không thêm logo/watermark mới.",
     "Chỉ tạo 1 ảnh kết quả hoàn chỉnh, không giải thích bằng văn bản.",
@@ -39,10 +39,14 @@ export async function POST(req: NextRequest) {
   const title = String(body?.title || "").trim();
   const part = Math.max(1, Number(body?.part) || 1);
   const customPrompt = String(body?.prompt || "").trim();
+  const language = body?.language ?? "vi";
+  if (language !== "vi" && language !== "en") {
+    return NextResponse.json({ detail: "Ngôn ngữ không hợp lệ." }, { status: 400 });
+  }
   if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) {
     return NextResponse.json({ detail: "video_id không hợp lệ." }, { status: 400 });
   }
-  if (!title) return NextResponse.json({ detail: "Thiếu tiêu đề tiếng Việt." }, { status: 400 });
+  if (!title) return NextResponse.json({ detail: "Thiếu tiêu đề." }, { status: 400 });
 
   const tempDir = path.join(os.tmpdir(), "yt-recent-chatgpt-thumb");
   fs.mkdirSync(tempDir, { recursive: true });
@@ -73,7 +77,7 @@ export async function POST(req: NextRequest) {
     }
 
     await attachImage(page, inputPath);
-    await submitPrompt(page, customPrompt || makePrompt(title, part));
+    await submitPrompt(page, customPrompt || makePrompt(title, part, language));
     const image = await extractGeneratedImage(page);
     if (!image) {
       return NextResponse.json(
